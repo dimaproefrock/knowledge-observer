@@ -1,0 +1,68 @@
+name: release
+
+# Build the `observer` binary for every supported OS/arch on a version tag and
+# attach them to the GitHub Release as assets (observer-<target>[.exe]). The plugin
+# consumes these at install/first-use time (the repo ships no prebuilt binaries).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: observer-linux-x64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset: observer-macos-x64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: observer-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: observer-windows-x64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --bin observer --target ${{ matrix.target }}
+
+      - name: Stage asset (unix)
+        if: runner.os != 'Windows'
+        run: cp "target/${{ matrix.target }}/release/observer" "${{ matrix.asset }}"
+
+      - name: Stage asset (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cp "target/${{ matrix.target }}/release/observer.exe" "${{ matrix.asset }}"
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+          fail_on_unmatched_files: true

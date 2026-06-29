@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Observer</title>
+<style>
+  :root {
+    /* Dark theme */
+    --bg-primary:       #0d1117;
+    --bg-secondary:     #161b22;
+    --bg-tertiary:      #21262d;
+    --bg-hover:         #30363d;
+    --border-primary:   #30363d;
+    --border-secondary: #21262d;
+    --text-primary:     #e6edf3;
+    --text-secondary:   #8b949e;
+    --text-tertiary:    #6e7681;
+    --accent-primary:   #58a6ff;
+    --accent-success:   #3fb950;
+    --accent-warning:   #d29922;
+    --accent-danger:    #f85149;
+    --radius-sm: 4px;
+    --radius-md: 8px;
+
+    /* type colours (ported from KnowledgeNode.css border-left bands) */
+    --t-entscheidung: #a855f7;
+    --t-erkenntnis:   #3b82f6;
+    --t-fakt:         #14b8a6;
+    --t-beobachtung:  #22c55e;
+    --t-recherche:    #eab308;
+    --t-vermutung:    #f97316;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg-primary); color: var(--text-primary);
+    font: 14px/1.5 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  body { display: flex; flex-direction: column; }
+
+  /* ---- top bar ---- */
+  header {
+    flex: 0 0 auto; padding: 8px 14px;
+    background: var(--bg-secondary); border-bottom: 1px solid var(--border-primary);
+    display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+    z-index: 20;
+  }
+  header h1 { font-size: 14px; margin: 0 8px 0 0; font-weight: 600; letter-spacing: .3px; }
+  #counts { color: var(--text-secondary); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .ctrl { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .ctrl > label { color: var(--text-tertiary); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  input[type=search], select {
+    background: var(--bg-tertiary); color: var(--text-primary);
+    border: 1px solid var(--border-primary); border-radius: var(--radius-sm);
+    padding: 5px 8px; font: inherit; font-size: 13px;
+  }
+  input[type=search] { min-width: 200px; }
+  input[type=search]:focus, select:focus { outline: none; border-color: var(--accent-primary); }
+  .toggles { display: flex; gap: 4px; flex-wrap: wrap; }
+  .toggle {
+    cursor: pointer; user-select: none;
+    border: 1px solid var(--border-primary); border-radius: 999px;
+    padding: 3px 9px; font-size: 11px; color: var(--text-tertiary);
+    background: var(--bg-tertiary); white-space: nowrap;
+  }
+  .toggle.on { color: var(--text-primary); border-color: currentColor; }
+  .toggle .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+
+  /* ---- legend ---- */
+  #legend { display: flex; gap: 14px; flex-wrap: wrap; margin-left: auto; color: var(--text-tertiary); font-size: 11px; }
+  #legend .lg { display: inline-flex; align-items: center; gap: 5px; }
+  #legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  #legend .ln { width: 18px; height: 0; border-top-width: 2px; border-top-style: solid; display: inline-block; }
+
+  /* ---- main layout ---- */
+  main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
+
+  /* viewport = pannable/zoomable canvas region */
+  #viewport {
+    flex: 1 1 auto; position: relative; overflow: hidden;
+    background:
+      radial-gradient(circle at 1px 1px, rgba(110,118,129,.18) 1px, transparent 0);
+    background-size: 28px 28px;
+    cursor: grab;
+  }
+  #viewport.grabbing { cursor: grabbing; }
+
+  /* the transformed "world" layer: cards + edges + axis all scale together */
+  #world {
+    position: absolute; top: 0; left: 0;
+    transform-origin: 0 0; will-change: transform;
+  }
+  #edges { position: absolute; top: 0; left: 0; pointer-events: none; overflow: visible; }
+
+  /* ---- per-item time-axis labels (left gutter, in world layer) ---- */
+  .axis-label {
+    position: absolute;
+    width: 96px; text-align: right; padding-right: 8px;
+    border-right: 2px solid var(--border-secondary);
+    font-size: 9px; font-variant-numeric: tabular-nums;
+    color: var(--text-tertiary); white-space: nowrap;
+    transform: translateY(-50%);
+    pointer-events: none;
+  }
+  /* type lane headers */
+  .lane-head {
+    position: absolute;
+    font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+    padding-bottom: 5px; border-bottom: 2px solid currentColor;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+    font-weight: 600;
+  }
+  .lane-head .n { color: var(--text-tertiary); font-weight: 400; }
+
+  /* ---- knowledge node card (ported from KnowledgeNode.css) ---- */
+  .knode {
+    position: absolute;
+    width: 200px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-left: 4px solid var(--text-tertiary);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+    font-size: 11px;
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px rgba(0,0,0,.2);
+    cursor: pointer;
+    transition: opacity .15s ease, box-shadow .15s ease, border-color .12s ease;
+  }
+  .knode.typ-entscheidung { border-left-color: var(--t-entscheidung); }
+  .knode.typ-erkenntnis   { border-left-color: var(--t-erkenntnis); }
+  .knode.typ-fakt         { border-left-color: var(--t-fakt); }
+  .knode.typ-beobachtung  { border-left-color: var(--t-beobachtung); }
+  .knode.typ-recherche    { border-left-color: var(--t-recherche); }
+  .knode.typ-vermutung    { border-left-color: var(--t-vermutung); }
+
+  .knode.sel { border-color: var(--accent-primary); box-shadow: 0 0 0 2px rgba(88,166,255,.5); }
+  .knode.dim { opacity: .22; }
+  .knode.ueberholt .kn-inhalt { text-decoration: line-through; }
+
+  .kn-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .kn-typ {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--text-secondary); font-weight: 600;
+  }
+  .kn-origin { color: var(--accent-primary); font-size: 8px; line-height: 1; }
+  .kn-score {
+    margin-left: auto; font-variant-numeric: tabular-nums;
+    font-size: 11px; font-weight: 600; color: var(--text-primary);
+    background: var(--bg-tertiary); border-radius: 8px; padding: 1px 6px;
+  }
+  .kn-inhalt {
+    line-height: 1.35;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .kn-begr {
+    margin-top: 3px; color: var(--text-secondary); line-height: 1.3;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .kn-begr .kb-label {
+    text-transform: uppercase; font-size: 9px; letter-spacing: .04em;
+    color: var(--text-tertiary); font-weight: 600;
+  }
+  .kn-wert { margin-top: 3px; color: var(--text-secondary); font-style: italic; }
+  .kn-tags { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 3px; }
+  .kt-tag {
+    font-size: 9px; padding: 0 5px; border-radius: 8px;
+    background: var(--bg-tertiary); color: var(--text-tertiary); border: 1px solid var(--border-secondary);
+  }
+  .kn-foot {
+    margin-top: 5px; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  }
+  .kn-time { font-size: 9px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .kn-status { font-size: 10px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: .03em; }
+  .status-gestützt   { color: #22c55e; }
+  .status-umstritten { color: #eab308; }
+  .status-widerlegt  { color: #ef4444; }
+  .status-aktiv      { color: #3b82f6; }
+  .status-erledigt   { color: #14b8a6; }
+  .status-überholt   { color: var(--text-tertiary); }
+  .status-unbelegt   { color: var(--text-tertiary); }
+
+  /* ---- document card (cited source) ---- */
+  .docnode {
+    position: absolute;
+    width: 150px;
+    background: var(--bg-tertiary);
+    border: 1px dashed var(--border-primary);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px; font-size: 11px; color: var(--text-primary);
+    transition: opacity .15s ease;
+  }
+  .docnode.dim { opacity: .22; }
+  .doc-head { display: flex; align-items: center; gap: 5px; color: var(--text-tertiary); margin-bottom: 3px; }
+  .doc-art { font-size: 9px; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+  .doc-titel {
+    line-height: 1.3;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+
+  /* ---- zoom controls (fixed, outside world) ---- */
+  #zoom-ctrl {
+    position: absolute; left: 12px; bottom: 12px; z-index: 15;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  #zoom-ctrl button {
+    width: 30px; height: 30px; font-size: 16px; line-height: 1;
+    background: var(--bg-secondary); color: var(--text-primary);
+    border: 1px solid var(--border-primary); border-radius: var(--radius-sm);
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  #zoom-ctrl button:hover { background: var(--bg-hover); border-color: var(--accent-primary); }
+  #zoom-ctrl button.fit { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+  #zoom-level {
+    position: absolute; right: 12px; bottom: 12px; z-index: 15;
+    font-size: 10px; color: var(--text-tertiary); background: var(--bg-secondary);
+    border: 1px solid var(--border-primary); border-radius: var(--radius-sm);
+    padding: 3px 7px; font-variant-numeric: tabular-nums; pointer-events: none;
+  }
+
+  /* ---- side / detail panel (fixed UI, not zoomed) ---- */
+  #side {
+    flex: 0 0 340px; max-width: 340px; border-left: 1px solid var(--border-primary);
+    background: var(--bg-secondary); overflow: auto; z-index: 10;
+  }
+  .panel { padding: 12px 14px; border-bottom: 1px solid var(--border-primary); }
+  .panel h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-tertiary); }
+  #detail .empty, #questions .empty { color: var(--text-tertiary); font-style: italic; }
+  #detail dl { margin: 0; }
+  #detail dt { color: var(--text-tertiary); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; margin-top: 10px; }
+  #detail dd { margin: 2px 0 0; word-break: break-word; font-size: 13px; }
+  #detail .big { font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+  #detail .badge {
+    display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
+    padding: 1px 7px; border-radius: 4px; color: #06080c; font-weight: 600;
+  }
+  .q { margin-bottom: 10px; }
+  .q .qt { color: var(--text-primary); }
+  .q .qv { color: var(--text-secondary); font-size: 11px; margin-top: 2px; }
+  .q .lead { color: var(--accent-success); }
+  #empty-graph {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text-tertiary); font-size: 16px; pointer-events: none; z-index: 5;
+  }
+  .hidden { display: none !important; }
+  code { background: var(--bg-tertiary); padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Knowledge&nbsp;Observer</h1>
+  <span id="counts">…</span>
+  <div class="ctrl">
+    <input type="search" id="search" placeholder="Suche in Inhalt / Begründung…" autocomplete="off">
+  </div>
+  <div class="ctrl">
+    <label>Typ</label>
+    <div class="toggles" id="typ-toggles"></div>
+  </div>
+  <div class="ctrl">
+    <label>Status</label>
+    <div class="toggles" id="status-toggles"></div>
+  </div>
+  <div class="ctrl">
+    <label>Tag</label>
+    <select id="tag-filter"><option value="">alle</option></select>
+  </div>
+  <div id="legend"></div>
+</header>
+
+<main>
+  <div id="viewport">
+    <div id="world">
+      <svg id="edges"></svg>
+      <!-- axis labels, lane heads, cards appended here -->
+    </div>
+    <div id="empty-graph" class="hidden">Noch kein Wissen erfasst.</div>
+    <div id="zoom-ctrl">
+      <button id="zoom-in" title="Hineinzoomen">+</button>
+      <button id="zoom-out" title="Herauszoomen">−</button>
+      <button id="zoom-fit" class="fit" title="Alles einpassen">Fit</button>
+    </div>
+    <div id="zoom-level">100%</div>
+  </div>
+  <aside id="side">
+    <div class="panel" id="detail">
+      <h3>Detail</h3>
+      <div class="empty">Knoten anklicken für Details.</div>
+    </div>
+    <div class="panel" id="questions">
+      <h3>Offene Fragen</h3>
+      <div class="empty">—</div>
+    </div>
+  </aside>
+</main>
+
+<script>
+"use strict";
+
+// ---- constants ----
+const TYPES = ["entscheidung", "erkenntnis", "fakt", "beobachtung", "recherche", "vermutung"];
+const TYPE_COLOR = {
+  entscheidung: "#a855f7", erkenntnis: "#3b82f6", fakt: "#14b8a6",
+  beobachtung: "#22c55e", recherche: "#eab308", vermutung: "#f97316",
+};
+const STATUSES = ["gestützt", "umstritten", "widerlegt", "unbelegt", "aktiv", "überholt", "erledigt"];
+
+// Edge stroke per polarity (ported from knowledgeLayout.ts edgeStroke).
+const POLARITY = {
+  stuetzt:      { color: "#22c55e", dash: "" },
+  widerspricht: { color: "#ef4444", dash: "" },
+  ersetzt:      { color: "#a855f7", dash: "6 3" },
+};
+const CITE = { color: "#9ca3af", dash: "5 4" };
+
+// ---- layout geometry (mirrors knowledgeLayout.ts) ----
+// y = chronological RANK (newest = row 0 at top), equal Y_GAP per item.
+// x = type lane; lane 6 = documents.
+const LANE = { entscheidung: 0, erkenntnis: 1, fakt: 2, beobachtung: 3, recherche: 4, vermutung: 5 };
+const DOC_LANE = 6;
+const X_GAP = 280;
+const Y_GAP = 150;
+const KNODE_W = 200;
+const KNODE_H = 96;       // estimate for edge anchoring + bbox
+const DOC_W = 150;
+const AXIS_X = -150;      // axis-label x in world coords (left gutter)
+const TOP_PAD = 40;       // room for lane headers at top
+const LEFT_PAD = 30;
+
+// ---- state ----
+let GRAPH = { nodes: [], edges: [], fragen: [], quellen: [] };
+let lastHash = "";
+let selectedId = null;
+const filters = { q: "", typ: new Set(TYPES), status: new Set(), tag: "" };
+
+// layout caches (world coords)
+const cardEls = new Map();   // node id -> DOM element  (knowledge + doc nodes)
+const center = new Map();    // node id -> {x,y} centre in world coords
+let worldBox = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+
+// zoom/pan view transform
+const view = { k: 1, x: 0, y: 0 };
+let viewInit = false;        // true once initial Fit has been applied
+
+// ---- helpers ----
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+function ts(datum) { const t = Date.parse(datum); return Number.isNaN(t) ? 0 : t; }
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+function statusClass(st) { return "status-" + (st || "unbelegt"); }
+// "DD.MM. HH:MM" local time (mirrors axisLabel / knowledge-time).
+function fmtTime(datum) {
+  const t = Date.parse(datum);
+  if (Number.isNaN(t)) return "";
+  const d = new Date(t), p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}. ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function docBasename(p) { const parts = String(p).split("/"); return parts[parts.length - 1] || p; }
+function hashGraph(g) {
+  let h = g.nodes.length + ":" + g.edges.length + ":" + (g.fragen || []).length + ":" + (g.quellen || []).length + "|";
+  for (const n of g.nodes) h += n.id + n.score + n.status + (n.ueberholt ? 1 : 0) + ";";
+  for (const e of g.edges) h += e.id + ";";
+  return h;
+}
+
+// ---- data load + poll ----
+async function load() {
+  try {
+    const res = await fetch("/graph.json", { cache: "no-store" });
+    if (!res.ok) return;
+    const g = await res.json();
+    g.nodes = g.nodes || []; g.edges = g.edges || [];
+    g.fragen = g.fragen || []; g.quellen = g.quellen || [];
+    const h = hashGraph(g);
+    if (h === lastHash) return;   // no change -> skip re-render (preserves view)
+    lastHash = h;
+    GRAPH = g;
+    rebuildTagFilter();
+    render();                     // view (zoom/pan) is preserved across re-renders
+  } catch (e) { /* transient — retry next tick */ }
+}
+
+function rebuildTagFilter() {
+  const sel = document.getElementById("tag-filter");
+  const cur = sel.value;
+  const tags = new Set();
+  for (const n of GRAPH.nodes) for (const t of (n.tags || [])) tags.add(t);
+  const sorted = [...tags].sort((a, b) => a.localeCompare(b, "de"));
+  sel.innerHTML = '<option value="">alle</option>' +
+    sorted.map(t => `<option>${esc(t)}</option>`).join("");
+  if (sorted.includes(cur)) sel.value = cur; else filters.tag = "";
+}
+
+// ---- filtering ----
+function nodeMatchesFilter(n) {
+  if (!filters.typ.has(n.typ)) return false;
+  if (filters.status.size && !filters.status.has(n.status)) return false;
+  if (filters.tag && !(n.tags || []).includes(filters.tag)) return false;
+  if (filters.q) {
+    const q = filters.q.toLowerCase();
+    const hay = (n.inhalt + " " + (n.begruendung || "") + " " + (n.wert || "")).toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+// ---- layout: rank-based, item-oriented ----
+function computeLayout() {
+  center.clear();
+
+  // chronological rank: newest first -> row 0 (top), older below.
+  const rank = new Map();
+  [...GRAPH.nodes].sort((a, b) => ts(b.datum) - ts(a.datum)).forEach((n, i) => rank.set(n.id, i));
+
+  // connection degree per node -> importance signal.
+  const deg = new Map();
+  for (const e of GRAPH.edges) {
+    deg.set(e.von, (deg.get(e.von) || 0) + 1);
+    deg.set(e.zu, (deg.get(e.zu) || 0) + 1);
+  }
+  let maxDeg = 1;
+  for (const v of deg.values()) if (v > maxDeg) maxDeg = v;
+
+  const imp = new Map();
+  for (const n of GRAPH.nodes) {
+    const r = rank.get(n.id) || 0;
+    const x = LEFT_PAD + (LANE[n.typ] ?? 5) * X_GAP;
+    const y = TOP_PAD + r * Y_GAP;
+    center.set(n.id, { x: x + KNODE_W / 2, y: y + KNODE_H / 2 });
+    n.__x = x; n.__y = y; n.__rank = r;
+    imp.set(n.id, clamp01(0.65 * ((deg.get(n.id) || 0) / maxDeg) + 0.35 * (n.score || 0)));
+  }
+
+  // documents lane (lane 6): only docs cited by present nodes, ranked by first cite.
+  const cited = [];
+  const seen = new Set();
+  for (const n of GRAPH.nodes) for (const q of (n.quelle_ids || [])) {
+    if (!seen.has(q)) { seen.add(q); cited.push(q); }
+  }
+  const docX = LEFT_PAD + DOC_LANE * X_GAP;
+  const docPos = new Map();
+  cited.forEach((id, i) => {
+    const y = TOP_PAD + i * Y_GAP;
+    docPos.set(id, { x: docX, y });
+    center.set("doc:" + id, { x: docX + DOC_W / 2, y: y + KNODE_H / 2 });
+  });
+
+  return { imp, docPos, cited, rankList: [...rank.entries()] };
+}
+
+// ---- render ----
+function render() {
+  const world = document.getElementById("world");
+  const emptyEl = document.getElementById("empty-graph");
+  cardEls.clear();
+  for (const el of world.querySelectorAll(".knode, .docnode, .axis-label, .lane-head")) el.remove();
+
+  if (!GRAPH.nodes.length) {
+    emptyEl.classList.remove("hidden");
+    document.getElementById("counts").textContent = "0 Knoten, 0 Kanten";
+    drawEdges();
+    renderQuestions();
+    return;
+  }
+  emptyEl.classList.add("hidden");
+
+  const { imp, docPos, cited } = computeLayout();
+  const matched = new Set(GRAPH.nodes.filter(nodeMatchesFilter).map(n => n.id));
+  const anyFilter = matched.size !== GRAPH.nodes.length;
+
+  // per-item time-axis labels (left gutter), one per node aligned to its row.
+  for (const n of GRAPH.nodes) {
+    const lab = document.createElement("div");
+    lab.className = "axis-label";
+    lab.style.left = AXIS_X + "px";
+    lab.style.top = (n.__y + KNODE_H / 2) + "px";
+    lab.style.width = (LEFT_PAD + AXIS_X * -1 - 12) + "px"; // gutter up to lane 0
+    lab.textContent = fmtTime(n.datum);
+    world.appendChild(lab);
+  }
+
+  // type lane headers
+  for (const typ of TYPES) {
+    const count = GRAPH.nodes.filter(n => n.typ === typ).length;
+    const head = document.createElement("div");
+    head.className = "lane-head";
+    head.style.color = TYPE_COLOR[typ];
+    head.style.left = (LEFT_PAD + LANE[typ] * X_GAP) + "px";
+    head.style.top = "6px";
+    head.style.width = KNODE_W + "px";
+    head.innerHTML = `<span>${esc(typ)}</span><span class="n">${count}</span>`;
+    world.appendChild(head);
+  }
+  if (cited.length) {
+    const head = document.createElement("div");
+    head.className = "lane-head";
+    head.style.color = CITE.color;
+    head.style.left = (LEFT_PAD + DOC_LANE * X_GAP) + "px";
+    head.style.top = "6px";
+    head.style.width = DOC_W + "px";
+    head.innerHTML = `<span>dokumente</span><span class="n">${cited.length}</span>`;
+    world.appendChild(head);
+  }
+
+  // knowledge cards
+  for (const n of GRAPH.nodes) {
+    world.appendChild(makeCard(n, matched, anyFilter, imp.get(n.id) || 0));
+  }
+
+  // document cards
+  const byId = new Map((GRAPH.quellen || []).map(q => [q.id, q]));
+  for (const id of cited) {
+    world.appendChild(makeDocCard(id, byId.get(id), docPos.get(id), matched, anyFilter));
+  }
+
+  computeWorldBox();
+  document.getElementById("counts").textContent =
+    `${GRAPH.nodes.length} Knoten, ${GRAPH.edges.length} Kanten` +
+    (cited.length ? `, ${cited.length} Dok.` : "");
+
+  drawEdges();
+  applyTransform();
+  if (!viewInit) { fitToView(); viewInit = true; }
+  renderQuestions();
+  if (selectedId) {
+    const n = GRAPH.nodes.find(x => x.id === selectedId);
+    if (n) renderDetail(n); else { selectedId = null; renderDetail(null); }
+  }
+}
+
+function makeCard(n, matched, anyFilter, importance) {
+  const el = document.createElement("div");
+  el.className = "knode typ-" + n.typ + (n.ueberholt ? " ueberholt" : "");
+  el.style.left = n.__x + "px";
+  el.style.top = n.__y + "px";
+  if (selectedId === n.id) el.classList.add("sel");
+  if (anyFilter && !matched.has(n.id)) el.classList.add("dim");
+
+  // importance subtly emphasizes: stronger shadow + tinted border for hubs.
+  if (importance > 0.05 && !el.classList.contains("sel")) {
+    const c = TYPE_COLOR[n.typ] || "#888";
+    el.style.boxShadow = `0 1px 3px rgba(0,0,0,.2), 0 0 ${4 + importance * 18}px rgba(88,166,255,${0.05 + importance * 0.30})`;
+    el.style.borderColor = c + "66";
+  }
+
+  const score = typeof n.score === "number" ? n.score.toFixed(2) : "—";
+  const tags = (n.tags || []).slice(0, 4).map(t => `<span class="kt-tag">${esc(t)}</span>`).join("");
+  const origin = n.herkunft === "observer" ? `<span class="kn-origin" title="observer">●</span>` : "";
+  const begr = n.begruendung
+    ? `<div class="kn-begr"><span class="kb-label">warum </span>${esc(n.begruendung)}</div>` : "";
+  const wert = n.wert ? `<div class="kn-wert">${esc(n.wert)}</div>` : "";
+
+  el.innerHTML =
+    `<div class="kn-head"><span class="kn-typ">${esc(n.typ)}</span>${origin}` +
+      `<span class="kn-score">${score}</span></div>` +
+    `<div class="kn-inhalt">${esc(n.inhalt)}</div>` +
+    begr + wert +
+    (tags ? `<div class="kn-tags">${tags}</div>` : "") +
+    `<div class="kn-foot"><span class="kn-time">${esc(fmtTime(n.datum))}</span>` +
+      `<span class="kn-status ${statusClass(n.status)}">${esc(n.status || "—")}</span></div>`;
+
+  el.addEventListener("click", (ev) => { ev.stopPropagation(); selectNode(n.id); });
+  cardEls.set(n.id, el);
+  return el;
+}
+
+function makeDocCard(id, q, pos, matched, anyFilter) {
+  const el = document.createElement("div");
+  el.className = "docnode";
+  el.style.left = pos.x + "px";
+  el.style.top = pos.y + "px";
+  // dim a document if every node that cites it is filtered out.
+  if (anyFilter) {
+    const anyCiterShown = GRAPH.nodes.some(n => (n.quelle_ids || []).includes(id) && matched.has(n.id));
+    if (!anyCiterShown) el.classList.add("dim");
+  }
+  const art = (q && q.art) ? q.art : "doc";
+  const titel = (q && q.titel) ? q.titel : docBasename(id);
+  el.innerHTML =
+    `<div class="doc-head"><span class="doc-art">${esc(art)}</span></div>` +
+    `<div class="doc-titel">${esc(titel)}</div>`;
+  cardEls.set("doc:" + id, el);
+  return el;
+}
+
+function selectNode(id) {
+  selectedId = id;
+  for (const [nid, el] of cardEls) el.classList.toggle("sel", nid === id);
+  renderDetail(GRAPH.nodes.find(n => n.id === id) || null);
+  drawEdges();
+}
+
+function renderDetail(n) {
+  const box = document.getElementById("detail");
+  if (!n) { box.innerHTML = '<h3>Detail</h3><div class="empty">Knoten anklicken für Details.</div>'; return; }
+  const row = (label, val) =>
+    (val === undefined || val === null || val === "" ||
+      (Array.isArray(val) && !val.length)) ? "" :
+      `<dt>${esc(label)}</dt><dd>${Array.isArray(val) ? val.map(esc).join(", ") : esc(val)}</dd>`;
+
+  let html = '<h3>Detail</h3><dl>';
+  html += `<dt>Typ</dt><dd><span class="badge" style="background:${TYPE_COLOR[n.typ] || "#888"}">${esc(n.typ)}</span>` +
+          ` <span class="kn-status ${statusClass(n.status)}">${esc(n.status || "—")}</span></dd>`;
+  html += `<dt>Inhalt</dt><dd class="big">${esc(n.inhalt)}</dd>`;
+  html += row("Begründung", n.begruendung);
+  html += row("Datum", n.datum);
+  html += row("Score", (typeof n.score === "number" ? n.score.toFixed(3) : n.score));
+  html += row("Basis-Score", (typeof n.basis_score === "number" ? n.basis_score.toFixed(3) : n.basis_score));
+  html += row("Herkunft", n.herkunft);
+  html += row("Tags", n.tags);
+  html += row("Quelle-IDs", n.quelle_ids);
+  html += row("Frage-ID", n.frage_id);
+  html += row("Wert", n.wert);
+  html += row("Session-ID", n.session_id);
+  html += row("ID", n.id);
+  html += '</dl>';
+  box.innerHTML = html;
+}
+
+function renderQuestions() {
+  const box = document.getElementById("questions");
+  const fragen = GRAPH.fragen || [];
+  if (!fragen.length) {
+    box.innerHTML = '<h3>Offene Fragen</h3><div class="empty">—</div>';
+    return;
+  }
+  let html = '<h3>Offene Fragen (' + fragen.length + ')</h3>';
+  for (const f of fragen) {
+    const mass = {};
+    for (const n of GRAPH.nodes) {
+      if (n.typ === "fakt" && n.frage_id === f.id && n.wert) {
+        mass[n.wert] = (mass[n.wert] || 0) + (typeof n.basis_score === "number" ? n.basis_score : 0);
+      }
+    }
+    let lead = "", best = -1;
+    for (const [w, m] of Object.entries(mass)) if (m > best) { best = m; lead = w; }
+    const werte = (f.werte || []);
+    let vline = "";
+    if (werte.length) {
+      vline = werte.map(w => (w === lead && werte.length > 1)
+        ? `<span class="lead">${esc(w)}</span>` : esc(w)).join(" vs ");
+    }
+    html += `<div class="q"><div class="qt">${esc(f.inhalt)}</div>` +
+            (vline ? `<div class="qv">${vline}</div>` : "") + `</div>`;
+  }
+  box.innerHTML = html;
+}
+
+// ---- SVG edge overlay (world coords; scales with the world layer) ----
+function drawEdges() {
+  const svg = document.getElementById("edges");
+  svg.innerHTML = "";
+  if (!GRAPH.nodes.length) { svg.setAttribute("width", 0); svg.setAttribute("height", 0); return; }
+
+  // arrowhead marker
+  const ns = "http://www.w3.org/2000/svg";
+  const w = Math.max(1, worldBox.maxX) + 40;
+  const h = Math.max(1, worldBox.maxY) + 40;
+  svg.setAttribute("width", w); svg.setAttribute("height", h);
+  svg.style.width = w + "px"; svg.style.height = h + "px";
+
+  const defs = document.createElementNS(ns, "defs");
+  for (const [key, col] of [["g", "#22c55e"], ["r", "#ef4444"], ["p", "#a855f7"], ["c", "#9ca3af"]]) {
+    const m = document.createElementNS(ns, "marker");
+    m.setAttribute("id", "arr-" + key);
+    m.setAttribute("viewBox", "0 0 10 10");
+    m.setAttribute("refX", "9"); m.setAttribute("refY", "5");
+    m.setAttribute("markerWidth", "6"); m.setAttribute("markerHeight", "6");
+    m.setAttribute("orient", "auto-start-reverse");
+    const path = document.createElementNS(ns, "path");
+    path.setAttribute("d", "M0,0 L10,5 L0,10 z");
+    path.setAttribute("fill", col);
+    m.appendChild(path); defs.appendChild(m);
+  }
+  svg.appendChild(defs);
+
+  const markerKey = (col) => col === "#22c55e" ? "g" : col === "#ef4444" ? "r" : col === "#a855f7" ? "p" : "c";
+
+  const line = (a, b, col, dash, sel, marker) => {
+    const ln = document.createElementNS(ns, "line");
+    ln.setAttribute("x1", a.x); ln.setAttribute("y1", a.y);
+    ln.setAttribute("x2", b.x); ln.setAttribute("y2", b.y);
+    ln.setAttribute("stroke", col);
+    ln.setAttribute("stroke-width", sel ? "2.4" : "1.6");
+    ln.setAttribute("opacity", sel ? "0.95" : "0.45");
+    if (dash) ln.setAttribute("stroke-dasharray", dash);
+    if (marker) ln.setAttribute("marker-end", "url(#arr-" + markerKey(col) + ")");
+    svg.appendChild(ln);
+  };
+
+  // DAG edges
+  for (const e of GRAPH.edges) {
+    const a = center.get(e.von), b = center.get(e.zu);
+    if (!a || !b) continue;
+    const pol = POLARITY[e.polaritaet] || POLARITY.stuetzt;
+    const sel = selectedId && (e.von === selectedId || e.zu === selectedId);
+    line(a, b, pol.color, pol.dash, sel, true);
+  }
+
+  // dashed "cites" edges from node -> doc
+  for (const n of GRAPH.nodes) {
+    const a = center.get(n.id);
+    if (!a) continue;
+    for (const q of (n.quelle_ids || [])) {
+      const b = center.get("doc:" + q);
+      if (!b) continue;
+      const sel = selectedId && n.id === selectedId;
+      line(a, b, CITE.color, CITE.dash, sel, false);
+    }
+  }
+}
+
+// ---- world bbox + zoom/pan ----
+function computeWorldBox() {
+  let minX = AXIS_X, minY = 0, maxX = 0, maxY = 0;
+  for (const n of GRAPH.nodes) {
+    maxX = Math.max(maxX, n.__x + KNODE_W);
+    maxY = Math.max(maxY, n.__y + KNODE_H);
+  }
+  // doc lane extent
+  const docX = LEFT_PAD + DOC_LANE * X_GAP;
+  maxX = Math.max(maxX, docX + DOC_W);
+  worldBox = { minX, minY, maxX, maxY: Math.max(maxY, TOP_PAD + Y_GAP) };
+}
+
+function applyTransform() {
+  const world = document.getElementById("world");
+  world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.k})`;
+  document.getElementById("zoom-level").textContent = Math.round(view.k * 100) + "%";
+}
+
+function fitToView() {
+  const vp = document.getElementById("viewport");
+  const W = vp.clientWidth, H = vp.clientHeight;
+  const bw = (worldBox.maxX - worldBox.minX) || 1;
+  const bh = (worldBox.maxY - worldBox.minY) || 1;
+  const pad = 40;
+  let k = Math.min((W - pad * 2) / bw, (H - pad * 2) / bh);
+  k = Math.max(0.2, Math.min(2.5, k));
+  view.k = k;
+  // centre the bbox in the viewport
+  view.x = (W - bw * k) / 2 - worldBox.minX * k;
+  view.y = (H - bh * k) / 2 - worldBox.minY * k;
+  applyTransform();
+}
+
+function zoomAt(clientX, clientY, factor) {
+  const vp = document.getElementById("viewport");
+  const r = vp.getBoundingClientRect();
+  const px = clientX - r.left, py = clientY - r.top;
+  // world point under the cursor BEFORE zoom
+  const wx = (px - view.x) / view.k, wy = (py - view.y) / view.k;
+  let k = view.k * factor;
+  k = Math.max(0.2, Math.min(2.5, k));
+  view.k = k;
+  // re-pin so the same world point stays under the cursor
+  view.x = px - wx * k;
+  view.y = py - wy * k;
+  applyTransform();
+}
+
+function setupZoomPan() {
+  const vp = document.getElementById("viewport");
+
+  vp.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const factor = Math.exp(-e.deltaY * 0.0015);  // smooth, cursor-anchored
+    zoomAt(e.clientX, e.clientY, factor);
+  }, { passive: false });
+
+  // drag-to-pan on the background (not when starting on a card)
+  let panning = false, lastX = 0, lastY = 0;
+  vp.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest(".knode, .docnode")) return; // let clicks select
+    panning = true; lastX = e.clientX; lastY = e.clientY;
+    vp.classList.add("grabbing");
+    vp.setPointerCapture(e.pointerId);
+  });
+  vp.addEventListener("pointermove", (e) => {
+    if (!panning) return;
+    view.x += e.clientX - lastX;
+    view.y += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    applyTransform();
+  });
+  const endPan = (e) => {
+    if (!panning) return;
+    panning = false; vp.classList.remove("grabbing");
+    try { vp.releasePointerCapture(e.pointerId); } catch (_) {}
+  };
+  vp.addEventListener("pointerup", endPan);
+  vp.addEventListener("pointercancel", endPan);
+  // click empty background -> deselect
+  vp.addEventListener("click", (e) => {
+    if (e.target === vp || e.target.id === "world" || e.target.id === "edges") {
+      if (selectedId) { selectedId = null; for (const el of cardEls.values()) el.classList.remove("sel"); renderDetail(null); drawEdges(); }
+    }
+  });
+
+  document.getElementById("zoom-in").addEventListener("click", () => zoomCenter(1.2));
+  document.getElementById("zoom-out").addEventListener("click", () => zoomCenter(1 / 1.2));
+  document.getElementById("zoom-fit").addEventListener("click", fitToView);
+}
+
+function zoomCenter(factor) {
+  const vp = document.getElementById("viewport");
+  const r = vp.getBoundingClientRect();
+  zoomAt(r.left + vp.clientWidth / 2, r.top + vp.clientHeight / 2, factor);
+}
+
+// ---- controls ----
+function buildToggles() {
+  const tt = document.getElementById("typ-toggles");
+  for (const typ of TYPES) {
+    const b = document.createElement("span");
+    b.className = "toggle on";
+    b.style.color = TYPE_COLOR[typ];
+    b.innerHTML = `<span class="dot" style="background:${TYPE_COLOR[typ]}"></span>${typ}`;
+    b.addEventListener("click", () => {
+      if (filters.typ.has(typ)) filters.typ.delete(typ); else filters.typ.add(typ);
+      b.classList.toggle("on", filters.typ.has(typ));
+      render();
+    });
+    tt.appendChild(b);
+  }
+  const st = document.getElementById("status-toggles");
+  for (const s of STATUSES) {
+    const b = document.createElement("span");
+    b.className = "toggle";
+    b.textContent = s;
+    b.addEventListener("click", () => {
+      if (filters.status.has(s)) filters.status.delete(s); else filters.status.add(s);
+      b.classList.toggle("on", filters.status.has(s));
+      render();
+    });
+    st.appendChild(b);
+  }
+}
+
+function buildLegend() {
+  const lg = document.getElementById("legend");
+  const types = TYPES.map(t =>
+    `<span class="lg"><span class="sw" style="background:${TYPE_COLOR[t]}"></span>${t}</span>`).join("");
+  const pols =
+    `<span class="lg"><span class="ln" style="border-color:#22c55e"></span>stützt</span>` +
+    `<span class="lg"><span class="ln" style="border-color:#ef4444"></span>widerspricht</span>` +
+    `<span class="lg"><span class="ln" style="border-color:#a855f7;border-top-style:dashed"></span>ersetzt</span>` +
+    `<span class="lg"><span class="ln" style="border-color:#9ca3af;border-top-style:dashed"></span>zitiert</span>`;
+  lg.innerHTML = types + pols;
+}
+
+document.getElementById("search").addEventListener("input", (e) => {
+  filters.q = e.target.value.trim();
+  render();
+});
+document.getElementById("tag-filter").addEventListener("change", (e) => {
+  filters.tag = e.target.value;
+  render();
+});
+
+buildToggles();
+buildLegend();
+setupZoomPan();
+load();
+setInterval(load, 4000);   // live poll
+</script>
+</body>
+</html>

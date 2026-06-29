@@ -1,0 +1,4 @@
+# The launcher is a POSIX shell script — it MUST stay LF on every platform, or it
+# breaks with "bad interpreter" on macOS/Linux. Force LF regardless of core.autocrlf.
+bin/observer text eol=lf
+*.sh text eol=lf

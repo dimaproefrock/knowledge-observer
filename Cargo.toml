@@ -1,0 +1,24 @@
+[package]
+name = "knowledge-observer"
+version = "0.1.0"
+edition = "2021"
+description = "Transparent knowledge observer for Claude Code — a host-independent plugin."
+license = "MIT"
+repository = "https://github.com/dimaproefrock/knowledge-observer.git"
+
+# The plugin binary. Standalone — no host app required.
+[[bin]]
+name = "observer"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

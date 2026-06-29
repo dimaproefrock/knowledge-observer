@@ -1,0 +1,11 @@
+{
+  "name": "knowledge-observer-marketplace",
+  "owner": { "name": "Dima Pröfrock" },
+  "plugins": [
+    {
+      "name": "knowledge-observer",
+      "source": ".",
+      "description": "Transparent background knowledge observer for Claude Code."
+    }
+  ]
+}

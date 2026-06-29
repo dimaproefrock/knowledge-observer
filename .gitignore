@@ -1,0 +1,7 @@
+/target
+
+# Native binaries are build artifacts / GitHub Release assets — never committed.
+# The bin/observer WRAPPER (a POSIX shell script, no extension) and VERSION ARE committed;
+# the wrapper resolves a locally-built binary or downloads the per-OS release asset.
+**/*.exe
+/bin/observer-native

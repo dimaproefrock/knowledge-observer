@@ -1,0 +1,43 @@
+{
+  "name": "knowledge-observer",
+  "displayName": "Knowledge Observer",
+  "description": "Transparent background knowledge observer for Claude Code — builds a human-readable knowledge graph of your project's decisions, facts, and open questions, and feeds it back into every session.",
+  "author": { "name": "Dima Pröfrock" },
+  "repository": "https://github.com/dimaproefrock/knowledge-observer",
+  "license": "MIT",
+  "keywords": ["knowledge", "observer", "memory", "graph", "context"],
+  "defaultEnabled": true,
+  "mcpServers": {
+    "knowledge-observer": { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/bin/observer", "mcp-serve"] }
+  },
+  "userConfig": {
+    "knowledge_dir": {
+      "type": "directory",
+      "title": "Knowledge storage directory",
+      "description": "Where this project's knowledge graph is stored. A RELATIVE path (default .claude/knowledge) resolves per-project, so multiple projects stay isolated automatically. Set an ABSOLUTE path only per-project, in <project>/.claude/observer.json — a global absolute path would funnel every project into one folder.",
+      "default": ".claude/knowledge"
+    },
+    "enabled": {
+      "type": "boolean",
+      "title": "Enabled",
+      "description": "Turn the observer on/off for this project.",
+      "default": true
+    },
+    "model": {
+      "type": "string",
+      "title": "Observer model",
+      "description": "Optional claude model id for the background observer agent (blank = CLI default)."
+    },
+    "prompt_extra": {
+      "type": "string",
+      "title": "Extra extraction guidance",
+      "description": "Appended to the built-in extraction prompt — project-specific hints for what to record."
+    },
+    "idle_daemon_secs": {
+      "type": "number",
+      "title": "Daemon idle shutdown (seconds)",
+      "description": "The per-project single-writer daemon shuts down after this much idle time (default 600).",
+      "default": 600
+    }
+  }
+}
