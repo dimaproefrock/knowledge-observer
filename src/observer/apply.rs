@@ -224,7 +224,7 @@ mod tests {
     fn add_with_begruendung_lands_with_origin() {
         let dir = tmp();
         let result = ExtractionResult {
-            ops: vec![add("beobachtung", "the pty manager owns the writer", "welche Frage?")],
+            ops: vec![add("observation", "the pty manager owns the writer", "welche Frage?")],
             rolling_summary: String::new(),
             hint: String::new(),
         };
@@ -242,7 +242,7 @@ mod tests {
     fn add_without_begruendung_is_dropped() {
         let dir = tmp();
         let result = ExtractionResult {
-            ops: vec![add("beobachtung", "no rationale here", "   ")],
+            ops: vec![add("observation", "no rationale here", "   ")],
             rolling_summary: String::new(),
             hint: String::new(),
         };
@@ -259,8 +259,8 @@ mod tests {
         let dir = tmp();
         let result = ExtractionResult {
             ops: vec![
-                add("fakt", "DB uses WAL mode", "user said"),
-                add("fakt", "DB uses WAL mode", "user said"),
+                add("fact", "DB uses WAL mode", "user said"),
+                add("fact", "DB uses WAL mode", "user said"),
             ],
             rolling_summary: String::new(),
             hint: String::new(),
@@ -282,8 +282,8 @@ mod tests {
         // Create two nodes first via two Adds.
         let setup = ExtractionResult {
             ops: vec![
-                add("erkenntnis", "Pathfinding is the bottleneck", "warum?"),
-                add("beobachtung", "Profiler shows A* hot in frames", "welche Frage?"),
+                add("insight", "Pathfinding is the bottleneck", "warum?"),
+                add("observation", "Profiler shows A* hot in frames", "welche Frage?"),
             ],
             rolling_summary: String::new(),
             hint: String::new(),
@@ -295,7 +295,7 @@ mod tests {
             ops: vec![Op::Link {
                 von: "Pathfinding is the bottleneck".to_string(),
                 zu: "Profiler shows A*".to_string(),
-                polaritaet: "stuetzt".to_string(),
+                polaritaet: "supports".to_string(),
             }],
             rolling_summary: String::new(),
             hint: String::new(),
@@ -319,7 +319,7 @@ mod tests {
 
         let result = ExtractionResult {
             ops: vec![add_with_quellen(
-                "fakt",
+                "fact",
                 "Weapons use a 32-byte header",
                 "documented in F004",
                 vec![&doc_id],
@@ -349,7 +349,7 @@ mod tests {
 
         let result = ExtractionResult {
             ops: vec![add_with_quellen(
-                "fakt",
+                "fact",
                 "Some fact",
                 "user said",
                 vec![".claude/features/does-not-exist.md"],
@@ -377,7 +377,7 @@ mod tests {
         let dir = tmp();
         let _ls = LinkSpec {
             ziel: "x".into(),
-            polaritaet: "stuetzt".into(),
+            polaritaet: "supports".into(),
             als: "parent".into(),
         };
         let result = ExtractionResult {

@@ -29,7 +29,7 @@ pub(crate) fn seed_baseline_datum(graph: &KnowledgeGraph) -> String {
         .to_string()
 }
 
-/// Compute the Index-Delta: nodes that are status `aktiv`/`gestützt`, whose `datum`
+/// Compute the Index-Delta: nodes that are status `active`/`supported`, whose `datum`
 /// is strictly newer than the last-informed high-water mark, that did NOT originate
 /// in THIS session (we never nudge the agent about its own turns), and that were not
 /// already announced (dedupe by id). Pure — no I/O.
@@ -41,7 +41,7 @@ pub(crate) fn compute_index_delta<'a>(
     graph
         .nodes
         .iter()
-        .filter(|n| n.status == "aktiv" || n.status == "gestützt")
+        .filter(|n| n.status == "active" || n.status == "supported")
         .filter(|n| n.datum.as_str() > state.last_informed_datum.as_str())
         .filter(|n| n.session_id.as_deref() != Some(session_id))
         .filter(|n| !state.informed_node_ids.iter().any(|id| id == &n.id))
@@ -61,7 +61,7 @@ pub(crate) fn format_delta_hint(delta: &[&Node]) -> String {
         joined.push_str(" …");
     }
     format!(
-        "[Wissen] Index aktualisiert: {} neue/geänderte Knoten — z. B. {}",
+        "[Knowledge] Index updated: {} new/changed node(s) — e.g. {}",
         delta.len(),
         joined
     )
@@ -180,7 +180,7 @@ mod tests {
     fn node(id: &str, status: &str, datum: &str, session: Option<&str>, inhalt: &str) -> Node {
         Node {
             id: id.to_string(),
-            typ: NodeType::Fakt,
+            typ: NodeType::Fact,
             inhalt: inhalt.to_string(),
             begruendung: String::new(),
             datum: datum.to_string(),
@@ -242,7 +242,7 @@ mod tests {
     fn delta_includes_other_session_newer_node() {
         let g = graph_of(vec![node(
             "n1",
-            "gestützt",
+            "supported",
             "2026-06-17T12:00:00Z",
             Some("other-session"),
             "WAL mode",
@@ -260,7 +260,7 @@ mod tests {
     fn delta_excludes_own_session_node() {
         let g = graph_of(vec![node(
             "n1",
-            "gestützt",
+            "supported",
             "2026-06-17T12:00:00Z",
             Some("this-session"),
             "X",
@@ -275,9 +275,9 @@ mod tests {
     #[test]
     fn delta_excludes_retired_and_refuted_nodes() {
         let g = graph_of(vec![
-            node("a", "überholt", "2026-06-17T12:00:00Z", Some("other"), "old"),
-            node("b", "widerlegt", "2026-06-17T12:00:00Z", Some("other"), "wrong"),
-            node("c", "erledigt", "2026-06-17T12:00:00Z", Some("other"), "done"),
+            node("a", "superseded", "2026-06-17T12:00:00Z", Some("other"), "old"),
+            node("b", "refuted", "2026-06-17T12:00:00Z", Some("other"), "wrong"),
+            node("c", "done", "2026-06-17T12:00:00Z", Some("other"), "done"),
         ]);
         let state = HintState {
             informed_node_ids: vec![],
@@ -290,7 +290,7 @@ mod tests {
     fn delta_excludes_already_informed_id() {
         let g = graph_of(vec![node(
             "n1",
-            "aktiv",
+            "active",
             "2026-06-17T12:00:00Z",
             Some("other"),
             "X",
@@ -306,7 +306,7 @@ mod tests {
     fn delta_excludes_not_newer_than_watermark() {
         let g = graph_of(vec![node(
             "n1",
-            "aktiv",
+            "active",
             "2026-06-17T00:00:00Z",
             Some("other"),
             "X",
@@ -321,8 +321,8 @@ mod tests {
     #[test]
     fn seed_baseline_returns_max_datum() {
         let g = graph_of(vec![
-            node("a", "aktiv", "2026-06-10T00:00:00Z", Some("other"), "older"),
-            node("b", "aktiv", "2026-06-17T00:00:00Z", Some("other"), "newest"),
+            node("a", "active", "2026-06-10T00:00:00Z", Some("other"), "older"),
+            node("b", "active", "2026-06-17T00:00:00Z", Some("other"), "newest"),
         ]);
         assert_eq!(seed_baseline_datum(&g), "2026-06-17T00:00:00Z");
 
@@ -341,14 +341,14 @@ mod tests {
     #[test]
     fn format_delta_hint_caps_titles_and_adds_ellipsis() {
         let nodes = vec![
-            node("a", "aktiv", "d", Some("o"), "Alpha"),
-            node("b", "aktiv", "d", Some("o"), "Beta"),
-            node("c", "aktiv", "d", Some("o"), "Gamma"),
-            node("d", "aktiv", "d", Some("o"), "Delta"),
+            node("a", "active", "d", Some("o"), "Alpha"),
+            node("b", "active", "d", Some("o"), "Beta"),
+            node("c", "active", "d", Some("o"), "Gamma"),
+            node("d", "active", "d", Some("o"), "Delta"),
         ];
         let refs: Vec<&Node> = nodes.iter().collect();
         let line = format_delta_hint(&refs);
-        assert!(line.starts_with("[Wissen] Index aktualisiert: 4 neue/geänderte Knoten"));
+        assert!(line.starts_with("[Knowledge] Index updated: 4 new/changed node(s)"));
         assert!(line.contains("Alpha"));
         assert!(line.contains("Beta"));
         assert!(line.contains("Gamma"));

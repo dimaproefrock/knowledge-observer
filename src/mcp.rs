@@ -170,8 +170,8 @@ of), 'limit' (top-N by score); matches include direct neighbours. Then fetch FUL
                 "type": "object",
                 "properties": {
                     "q": { "type": "string", "description": "Keyword matched in node content (case-insensitive)." },
-                    "typ": { "type": "string", "enum": ["entscheidung","erkenntnis","fakt","beobachtung","recherche","vermutung"] },
-                    "status": { "type": "string", "enum": ["gestützt","umstritten","widerlegt","unbelegt"] },
+                    "typ": { "type": "string", "enum": ["decision","insight","fact","observation","research","hypothesis"] },
+                    "status": { "type": "string", "enum": ["supported","disputed","refuted","unsupported"] },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Match nodes carrying ANY of these topic/area tags." },
                     "limit": { "type": "integer", "description": "Keep only the top-N matches by score." }
                 },
@@ -432,7 +432,7 @@ mod tests {
         let kdir = crate::config::Config::resolve(&proj).knowledge_dir_abs(&proj);
         crate::store::knowledge_store::add_node(
             &kdir,
-            crate::store::knowledge_store::NodeType::Entscheidung,
+            crate::store::knowledge_store::NodeType::Decision,
             "Wir nutzen Tauri 2".into(),
             "damit wir eine Desktop-App haben",
             None,
@@ -448,7 +448,7 @@ mod tests {
         assert_eq!(resp["result"]["isError"], json!(false));
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let payload: Value = serde_json::from_str(text).expect("tool result is JSON");
-        let decisions = payload["aktive_entscheidungen"].as_array().unwrap();
+        let decisions = payload["active_decisions"].as_array().unwrap();
         assert_eq!(decisions.len(), 1, "expected one active decision: {text}");
         assert_eq!(decisions[0]["inhalt"], json!("Wir nutzen Tauri 2"));
         let _ = std::fs::remove_dir_all(&proj);
@@ -460,7 +460,7 @@ mod tests {
         let kdir = crate::config::Config::resolve(&proj).knowledge_dir_abs(&proj);
         crate::store::knowledge_store::add_node(
             &kdir,
-            crate::store::knowledge_store::NodeType::Beobachtung,
+            crate::store::knowledge_store::NodeType::Observation,
             "Ein beobachtetes Detail".into(),
             "welche Frage beantwortet das?",
             None,

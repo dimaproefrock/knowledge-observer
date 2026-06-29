@@ -199,7 +199,7 @@ mod tests {
 
         let n = knowledge_store::add_node(
             &dir,
-            NodeType::Fakt,
+            NodeType::Fact,
             "Test-Inhalt".to_string(),
             "weil Quelle X",
             None,

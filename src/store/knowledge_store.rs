@@ -34,38 +34,52 @@ use crate::store::now;
 /// but its IPC handler runs one worker thread per connection.
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Node type. Variant names + serialized codes are English (public release). The
+/// schema field KEYS (`typ`, `status`, `inhalt`, …) stay as-is on purpose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeType {
-    Entscheidung,
-    Erkenntnis,
-    Fakt,
-    Beobachtung,
-    Recherche,
-    Vermutung,
+    Decision,
+    Insight,
+    Fact,
+    Observation,
+    Research,
+    Hypothesis,
 }
 
 impl NodeType {
     /// Concept §3.2 type defaults (overridable per node).
     pub fn default_basis_score(self) -> f64 {
         match self {
-            NodeType::Fakt => 0.95,
-            NodeType::Beobachtung => 0.90,
-            NodeType::Recherche => 0.70,
-            NodeType::Vermutung => 0.30,
+            NodeType::Fact => 0.95,
+            NodeType::Observation => 0.90,
+            NodeType::Research => 0.70,
+            NodeType::Hypothesis => 0.30,
             // Inner nodes: score is aggregated from children by the real engine.
-            NodeType::Erkenntnis | NodeType::Entscheidung => 0.50,
+            NodeType::Insight | NodeType::Decision => 0.50,
         }
     }
 
+    /// Parse a node-type code. Accepts BOTH the new English codes AND the legacy
+    /// German codes (back-compat: existing stores hold German `typ:` values). The
+    /// engine always SERIALIZES the English form, so a load/save flips a store to
+    /// English. Keep the German arms until all known stores are migrated.
     pub fn parse(s: &str) -> Option<NodeType> {
         match s.trim().to_lowercase().as_str() {
-            "entscheidung" => Some(NodeType::Entscheidung),
-            "erkenntnis" => Some(NodeType::Erkenntnis),
-            "fakt" => Some(NodeType::Fakt),
-            "beobachtung" => Some(NodeType::Beobachtung),
-            "recherche" => Some(NodeType::Recherche),
-            "vermutung" => Some(NodeType::Vermutung),
+            // English (canonical)
+            "decision" => Some(NodeType::Decision),
+            "insight" => Some(NodeType::Insight),
+            "fact" => Some(NodeType::Fact),
+            "observation" => Some(NodeType::Observation),
+            "research" => Some(NodeType::Research),
+            "hypothesis" => Some(NodeType::Hypothesis),
+            // Legacy German (back-compat read)
+            "entscheidung" => Some(NodeType::Decision),
+            "erkenntnis" => Some(NodeType::Insight),
+            "fakt" => Some(NodeType::Fact),
+            "beobachtung" => Some(NodeType::Observation),
+            "recherche" => Some(NodeType::Research),
+            "vermutung" => Some(NodeType::Hypothesis),
             _ => None,
         }
     }
@@ -77,8 +91,8 @@ pub struct Node {
     pub typ: NodeType,
     pub inhalt: String,
     /// Type-adaptive rationale (required at the API): why this node exists —
-    /// the question it answers (evidence), the thinking behind it (erkenntnis),
-    /// its purpose (entscheidung = "damit"), or its source (fakt = "woher").
+    /// the question it answers (evidence), the reasoning behind it (insight),
+    /// its purpose (decision = "what for"), or its source (fact = "where from").
     /// `#[serde(default)]` so pre-field graphs still load (empty = unknown).
     #[serde(default)]
     pub begruendung: String,
@@ -87,7 +101,8 @@ pub struct Node {
     pub basis_score: f64,
     /// Computed by the bottom-up engine (`recompute_scores`, §4). Leaves = basis.
     pub score: f64,
-    /// Computed: unbelegt | gestützt | umstritten | widerlegt.
+    /// Computed: unsupported | supported | disputed | refuted (lifecycle states
+    /// active | superseded | done override the belief status — see the engine).
     pub status: String,
     /// "session" (recorded by Claude during work) | "manual" (human-curated).
     pub herkunft: String,
@@ -107,13 +122,13 @@ pub struct Node {
     /// retrieval across work-streams. Durable; does not affect the score.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    /// Lifecycle: explicitly retired ("überholt") without a replacement. A node is
-    /// also effectively retired when an `ersetzt` edge points at it. Decisions get
-    /// status aktiv/überholt from this instead of the belief status.
+    /// Lifecycle: explicitly retired ("superseded") without a replacement. A node is
+    /// also effectively retired when a `replaces` edge points at it. Decisions get
+    /// status active/superseded from this instead of the belief status.
     #[serde(default, skip_serializing_if = "is_false")]
     pub ueberholt: bool,
     /// Lifecycle: carried out / done but NOT replaced. Drops out of "what holds
-    /// now" without being wrong. Precedence: überholt > erledigt > aktiv.
+    /// now" without being wrong. Precedence: superseded > done > active.
     #[serde(default, skip_serializing_if = "is_false")]
     pub erledigt: bool,
 }
@@ -129,7 +144,7 @@ pub struct Edge {
     pub von: String,
     /// Child (the supporting/contradicting node).
     pub zu: String,
-    /// "stuetzt" | "widerspricht".
+    /// "supports" | "contradicts" | "replaces".
     pub polaritaet: String,
     pub gewicht: f64,
 }
@@ -448,12 +463,12 @@ fn trim_one_trailing_newline(s: &str) -> String {
 /// Lowercase tag for a `NodeType` (matches `#[serde(rename_all = "lowercase")]`).
 fn node_type_str(t: NodeType) -> &'static str {
     match t {
-        NodeType::Entscheidung => "entscheidung",
-        NodeType::Erkenntnis => "erkenntnis",
-        NodeType::Fakt => "fakt",
-        NodeType::Beobachtung => "beobachtung",
-        NodeType::Recherche => "recherche",
-        NodeType::Vermutung => "vermutung",
+        NodeType::Decision => "decision",
+        NodeType::Insight => "insight",
+        NodeType::Fact => "fact",
+        NodeType::Observation => "observation",
+        NodeType::Research => "research",
+        NodeType::Hypothesis => "hypothesis",
     }
 }
 
@@ -464,11 +479,11 @@ const EPS: f64 = 1e-9;
 /// Bottom-up scoring engine (concept §4). Pure + deterministic, a single wave
 /// over the DAG (no fixpoint): children (`zu`) are computed before parents
 /// (`von`). Decisions taken (offene Punkte 1–4):
-/// - **Leaves** (Beob/Rech/Verm): `score = basis_score`; status "gestützt" unless
-///   contradicted from below (rare).
-/// - **Fakt**: `score = masse(wert)/(Σmasse+W)` within its Frage; status from the
+/// - **Leaves** (Observation/Research/Hypothesis): `score = basis_score`; status
+///   "supported" unless contradicted from below (rare).
+/// - **Fact**: `score = masse(wert)/(Σmasse+W)` within its Frage; status from the
 ///   competing-value mass share (Punkt 2).
-/// - **Erkenntnis/Entscheidung**: `pro/con = Σ score(kind)·gewicht`;
+/// - **Insight/Decision**: `pro/con = Σ score(kind)·gewicht`;
 ///   `score = pro/(pro+con+W)`; status from `r = con/(pro+con)` (Punkt 3:
 ///   score = Stärke, status = Einigkeit). Multi-path evidence reinforces (Punkt 1).
 fn recompute_scores(graph: &mut KnowledgeGraph) {
@@ -476,7 +491,7 @@ fn recompute_scores(graph: &mut KnowledgeGraph) {
     let mut masse: HashMap<(String, String), f64> = HashMap::new();
     let mut total: HashMap<String, f64> = HashMap::new();
     for n in &graph.nodes {
-        if n.typ == NodeType::Fakt {
+        if n.typ == NodeType::Fact {
             if let (Some(fid), Some(wert)) = (&n.frage_id, &n.wert) {
                 *masse.entry((fid.clone(), wert.clone())).or_insert(0.0) += n.basis_score;
                 *total.entry(fid.clone()).or_insert(0.0) += n.basis_score;
@@ -537,11 +552,11 @@ fn recompute_scores(graph: &mut KnowledgeGraph) {
         })
         .collect();
     let mut children: HashMap<String, Vec<(String, String, f64)>> = HashMap::new();
-    // `ersetzt` edges are lifecycle links, NOT evidence: the `zu` (old) node is
-    // superseded; they never feed pro/con.
+    // `replaces` edges are lifecycle links, NOT evidence: the `zu` (old) node is
+    // superseded; they never feed pro/con. (Legacy German "ersetzt" still honored.)
     let mut superseded: HashSet<String> = HashSet::new();
     for e in &graph.edges {
-        if e.polaritaet == "ersetzt" {
+        if e.polaritaet == "replaces" || e.polaritaet == "ersetzt" {
             superseded.insert(e.zu.clone());
             continue;
         }
@@ -558,7 +573,8 @@ fn recompute_scores(graph: &mut KnowledgeGraph) {
         if let Some(cs) = children.get(id) {
             for (zu, pol, gew) in cs {
                 let child = *scores.get(zu).unwrap_or(&0.0);
-                if pol == "widerspricht" {
+                // "contradicts" (legacy German "widerspricht") = con; else pro.
+                if pol == "contradicts" || pol == "widerspricht" {
                     con += child * gew;
                 } else {
                     pro += child * gew;
@@ -567,20 +583,20 @@ fn recompute_scores(graph: &mut KnowledgeGraph) {
         }
         let gesamt = pro + con;
         let (score, status) = match inf.typ {
-            NodeType::Beobachtung | NodeType::Recherche | NodeType::Vermutung => {
-                let st = if gesamt <= EPS { "gestützt".to_string() } else { status_from(pro, con) };
+            NodeType::Observation | NodeType::Research | NodeType::Hypothesis => {
+                let st = if gesamt <= EPS { "supported".to_string() } else { status_from(pro, con) };
                 (inf.basis, st)
             }
-            NodeType::Fakt => match (&inf.frage_id, &inf.wert) {
+            NodeType::Fact => match (&inf.frage_id, &inf.wert) {
                 (Some(fid), Some(wert)) => {
                     let t = *total.get(fid).unwrap_or(&0.0);
                     let m = *masse.get(&(fid.clone(), wert.clone())).unwrap_or(&0.0);
                     let sc = m / (t + W);
                     (sc, fakt_status(m, t))
                 }
-                _ => (inf.basis, "gestützt".to_string()),
+                _ => (inf.basis, "supported".to_string()),
             },
-            NodeType::Erkenntnis | NodeType::Entscheidung => {
+            NodeType::Insight | NodeType::Decision => {
                 (pro / (pro + con + W), status_from(pro, con))
             }
         };
@@ -590,8 +606,8 @@ fn recompute_scores(graph: &mut KnowledgeGraph) {
 
     // --- Write back ---
     // Lifecycle overrides the belief status: a retired node (explicit flag or
-    // superseded by an `ersetzt` edge) is "überholt"; a live `entscheidung` is
-    // "aktiv" (a choice isn't "weak" just for lacking evidence — its score still
+    // superseded by a `replaces` edge) is "superseded"; a live `decision` is
+    // "active" (a choice isn't "weak" just for lacking evidence — its score still
     // reflects how grounded it is). All other types keep their belief status.
     for n in &mut graph.nodes {
         if let Some(s) = scores.get(&n.id) {
@@ -599,11 +615,11 @@ fn recompute_scores(graph: &mut KnowledgeGraph) {
         }
         let retired = n.ueberholt || superseded.contains(&n.id);
         n.status = if retired {
-            "überholt".to_string()
+            "superseded".to_string()
         } else if n.erledigt {
-            "erledigt".to_string()
-        } else if n.typ == NodeType::Entscheidung {
-            "aktiv".to_string()
+            "done".to_string()
+        } else if n.typ == NodeType::Decision {
+            "active".to_string()
         } else {
             statuses.get(&n.id).cloned().unwrap_or_default()
         };
@@ -611,19 +627,19 @@ fn recompute_scores(graph: &mut KnowledgeGraph) {
 }
 
 /// Status from a pro/con pair (concept §4.4): `r = con/(pro+con)` — the conflict
-/// share, independent of `W`. Little evidence → "unbelegt".
+/// share, independent of `W`. Little evidence → "unsupported".
 fn status_from(pro: f64, con: f64) -> String {
     let gesamt = pro + con;
     if gesamt <= EPS {
-        return "unbelegt".to_string();
+        return "unsupported".to_string();
     }
     let r = con / gesamt;
     if r < 0.2 {
-        "gestützt".to_string()
+        "supported".to_string()
     } else if r > 0.8 {
-        "widerlegt".to_string()
+        "refuted".to_string()
     } else {
-        "umstritten".to_string()
+        "disputed".to_string()
     }
 }
 
@@ -631,7 +647,7 @@ fn status_from(pro: f64, con: f64) -> String {
 /// values' mass = "con".
 fn fakt_status(own_masse: f64, total_masse: f64) -> String {
     if total_masse <= EPS {
-        return "unbelegt".to_string();
+        return "unsupported".to_string();
     }
     status_from(own_masse, total_masse - own_masse)
 }
@@ -678,7 +694,7 @@ pub struct QueryFilter {
     pub q: Option<String>,
     /// Restrict to one node type.
     pub typ: Option<NodeType>,
-    /// Restrict to one status (gestützt|umstritten|widerlegt|unbelegt).
+    /// Restrict to one status (supported|disputed|refuted|unsupported).
     pub status: Option<String>,
     /// Keep only the top-N core matches by score.
     pub limit: Option<usize>,
@@ -870,15 +886,17 @@ pub fn add_edge(
     Ok(edge)
 }
 
+/// Normalize an edge-polarity input to the canonical English code. Accepts the new
+/// English codes, the legacy German codes (back-compat), and common shorthands.
 fn normalize_polaritaet(p: &str) -> Result<String> {
     match p.trim().to_lowercase().as_str() {
-        "stuetzt" | "stützt" | "+" | "supports" | "pro" => Ok("stuetzt".to_string()),
-        "widerspricht" | "-" | "contradicts" | "contra" | "con" => Ok("widerspricht".to_string()),
+        "supports" | "stuetzt" | "stützt" | "+" | "pro" => Ok("supports".to_string()),
+        "contradicts" | "widerspricht" | "-" | "contra" | "con" => Ok("contradicts".to_string()),
         // Lifecycle link: `von` (the new decision) replaces `zu` (the old one).
-        // Excluded from the belief score; marks `zu` as überholt.
-        "ersetzt" | "supersedes" | "überholt" | "ueberholt" | "replaces" => Ok("ersetzt".to_string()),
+        // Excluded from the belief score; marks `zu` as superseded.
+        "replaces" | "supersedes" | "ersetzt" | "überholt" | "ueberholt" => Ok("replaces".to_string()),
         other => Err(Error::msg(format!(
-            "invalid polaritaet '{other}' (use 'stuetzt', 'widerspricht' or 'ersetzt')"
+            "invalid polaritaet '{other}' (use 'supports', 'contradicts' or 'replaces')"
         ))),
     }
 }
@@ -919,11 +937,11 @@ pub fn add_fact(
 
     let node = Node {
         id: uuid::Uuid::new_v4().to_string(),
-        typ: NodeType::Fakt,
+        typ: NodeType::Fact,
         inhalt,
         begruendung: begruendung.to_string(),
         datum: now(),
-        basis_score: basis_score.unwrap_or_else(|| NodeType::Fakt.default_basis_score()),
+        basis_score: basis_score.unwrap_or_else(|| NodeType::Fact.default_basis_score()),
         score: 0.0,
         status: String::new(),
         herkunft: herkunft.to_string(),
@@ -1237,7 +1255,7 @@ pub fn hygiene_hints(graph: &KnowledgeGraph) -> Vec<String> {
         .filter(|n| {
             matches!(
                 n.typ,
-                NodeType::Beobachtung | NodeType::Recherche | NodeType::Vermutung
+                NodeType::Observation | NodeType::Research | NodeType::Hypothesis
             )
         })
         .filter(|n| !linked.contains(n.id.as_str()))
@@ -1249,7 +1267,7 @@ pub fn hygiene_hints(graph: &KnowledgeGraph) -> Vec<String> {
             .map(|n| format!("\"{}\"", truncate(&n.inhalt, 50)))
             .collect();
         hints.push(format!(
-            "{} Belege hängen an keiner Erkenntnis ({}{}). Prüfe, ob sich daraus eine Erkenntnis bündeln lässt (record_knowledge typ=erkenntnis, dann link auf die Belege).",
+            "{} pieces of evidence are not attached to any insight ({}{}). Check whether they can be bundled into an insight (record_knowledge typ=insight, then link to the evidence).",
             unlinked.len(),
             sample.join(", "),
             if unlinked.len() > 4 { ", …" } else { "" }
@@ -1260,7 +1278,7 @@ pub fn hygiene_hints(graph: &KnowledgeGraph) -> Vec<String> {
     for f in &graph.fragen {
         if f.werte.len() >= 2 {
             hints.push(format!(
-                "Frage „{}“ hat konkurrierende Werte ({}). Wenn eine Antwort gilt, halte das fest (Gewicht/Erkenntnis); sonst bleibt sie umstritten.",
+                "Question \"{}\" has competing values ({}). If one answer holds, record it (weight/insight); otherwise it stays disputed.",
                 truncate(&f.inhalt, 50),
                 f.werte.join(" vs ")
             ));
@@ -1271,7 +1289,7 @@ pub fn hygiene_hints(graph: &KnowledgeGraph) -> Vec<String> {
     let mut pol: HashMap<&str, (bool, bool)> = HashMap::new();
     for e in &graph.edges {
         let entry = pol.entry(e.von.as_str()).or_insert((false, false));
-        if e.polaritaet == "widerspricht" {
+        if e.polaritaet == "contradicts" || e.polaritaet == "widerspricht" {
             entry.1 = true;
         } else {
             entry.0 = true;
@@ -1281,7 +1299,7 @@ pub fn hygiene_hints(graph: &KnowledgeGraph) -> Vec<String> {
         if has_pro && has_con {
             if let Some(n) = graph.nodes.iter().find(|n| n.id == von) {
                 hints.push(format!(
-                    "„{}“ hat stützende UND widersprechende Belege — Widerspruch sichtbar; bewerten oder auflösen.",
+                    "\"{}\" has BOTH supporting AND contradicting evidence — conflict visible; assess or resolve it.",
                     truncate(&n.inhalt, 50)
                 ));
             }
@@ -1297,7 +1315,7 @@ pub fn hygiene_hints(graph: &KnowledgeGraph) -> Vec<String> {
         let key = n.inhalt.trim().to_lowercase();
         if by_norm.get(&key).copied().unwrap_or(0) >= 2 {
             hints.push(format!(
-                "Mögliche Dublette: „{}“ — zusammenführen oder verlinken statt duplizieren.",
+                "Possible duplicate: \"{}\" — merge or link instead of duplicating.",
                 truncate(&n.inhalt, 50)
             ));
             by_norm.insert(key, 0); // emit once per duplicate group
@@ -1338,8 +1356,8 @@ mod tests {
     #[test]
     fn add_node_roundtrips_with_default_basis_score() {
         let dir = temp_dir();
-        let n = add_node(&dir, NodeType::Beobachtung, "claude -p geht nicht".into(), "warum", None, "session").unwrap();
-        assert_eq!(n.typ, NodeType::Beobachtung);
+        let n = add_node(&dir, NodeType::Observation, "claude -p geht nicht".into(), "warum", None, "session").unwrap();
+        assert_eq!(n.typ, NodeType::Observation);
         assert_eq!(n.basis_score, 0.90);
         assert_eq!(n.score, 0.90); // stub: score == basis_score
         assert_eq!(n.herkunft, "session");
@@ -1353,7 +1371,7 @@ mod tests {
     #[test]
     fn add_node_honors_explicit_basis_score() {
         let dir = temp_dir();
-        let n = add_node(&dir, NodeType::Vermutung, "x".into(), "warum", Some(0.42), "manual").unwrap();
+        let n = add_node(&dir, NodeType::Hypothesis, "x".into(), "warum", Some(0.42), "manual").unwrap();
         assert_eq!(n.basis_score, 0.42);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1361,36 +1379,41 @@ mod tests {
     #[test]
     fn add_edge_links_and_rejects_cycles() {
         let dir = temp_dir();
-        let a = add_node(&dir, NodeType::Erkenntnis, "E".into(), "warum", None, "manual").unwrap();
-        let b = add_node(&dir, NodeType::Beobachtung, "B".into(), "warum", None, "manual").unwrap();
+        let a = add_node(&dir, NodeType::Insight, "E".into(), "warum", None, "manual").unwrap();
+        let b = add_node(&dir, NodeType::Observation, "B".into(), "warum", None, "manual").unwrap();
 
         // A depends on B (A → B): fine.
-        add_edge(&dir, &a.id, &b.id, "stuetzt", None).unwrap();
+        add_edge(&dir, &a.id, &b.id, "supports", None).unwrap();
         // B → A would close a cycle.
-        let err = add_edge(&dir, &b.id, &a.id, "stuetzt", None).unwrap_err();
+        let err = add_edge(&dir, &b.id, &a.id, "supports", None).unwrap_err();
         assert!(matches!(err, Error::Msg(_)));
 
         let g = query(&dir);
         assert_eq!(g.edges.len(), 1);
-        assert_eq!(g.edges[0].polaritaet, "stuetzt");
+        assert_eq!(g.edges[0].polaritaet, "supports");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn add_edge_rejects_missing_node() {
         let dir = temp_dir();
-        let a = add_node(&dir, NodeType::Erkenntnis, "E".into(), "warum", None, "manual").unwrap();
-        let err = add_edge(&dir, &a.id, "nope", "stuetzt", None).unwrap_err();
+        let a = add_node(&dir, NodeType::Insight, "E".into(), "warum", None, "manual").unwrap();
+        let err = add_edge(&dir, &a.id, "nope", "supports", None).unwrap_err();
         assert!(matches!(err, Error::Msg(_)));
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn polaritaet_is_normalized() {
-        assert_eq!(normalize_polaritaet("+").unwrap(), "stuetzt");
-        assert_eq!(normalize_polaritaet("stützt").unwrap(), "stuetzt");
-        assert_eq!(normalize_polaritaet("widerspricht").unwrap(), "widerspricht");
-        assert_eq!(normalize_polaritaet("-").unwrap(), "widerspricht");
+        assert_eq!(normalize_polaritaet("+").unwrap(), "supports");
+        assert_eq!(normalize_polaritaet("supports").unwrap(), "supports");
+        assert_eq!(normalize_polaritaet("contradicts").unwrap(), "contradicts");
+        assert_eq!(normalize_polaritaet("-").unwrap(), "contradicts");
+        assert_eq!(normalize_polaritaet("replaces").unwrap(), "replaces");
+        // Legacy German inputs still normalize to the English codes (back-compat).
+        assert_eq!(normalize_polaritaet("stützt").unwrap(), "supports");
+        assert_eq!(normalize_polaritaet("widerspricht").unwrap(), "contradicts");
+        assert_eq!(normalize_polaritaet("ersetzt").unwrap(), "replaces");
         assert!(normalize_polaritaet("maybe").is_err());
     }
 
@@ -1398,7 +1421,7 @@ mod tests {
     fn add_fact_creates_question_and_registers_value() {
         let dir = temp_dir();
         let f1 = add_fact(&dir, "Welche Python-Version?", "3.12", "pyproject sagt 3.12".into(), "woher", None, "session").unwrap();
-        assert_eq!(f1.typ, NodeType::Fakt);
+        assert_eq!(f1.typ, NodeType::Fact);
         assert_eq!(f1.wert.as_deref(), Some("3.12"));
         assert_eq!(f1.basis_score, 0.95);
 
@@ -1425,7 +1448,7 @@ mod tests {
             datum: "2026-06-04T00:00:00Z".into(),
             basis_score: 0.5,
             score: 0.5,
-            status: "unbewertet".into(),
+            status: "unsupported".into(),
             herkunft: "session".into(),
             frage_id: None,
             wert: None,
@@ -1443,27 +1466,27 @@ mod tests {
     #[test]
     fn hygiene_flags_unlinked_evidence() {
         let g = KnowledgeGraph {
-            nodes: vec![mk("a", NodeType::Beobachtung, "x"), mk("b", NodeType::Recherche, "y")],
+            nodes: vec![mk("a", NodeType::Observation, "x"), mk("b", NodeType::Research, "y")],
             edges: vec![],
             fragen: vec![],
             quellen: vec![],
         };
-        assert!(hygiene_hints(&g).iter().any(|s| s.contains("keiner Erkenntnis")));
+        assert!(hygiene_hints(&g).iter().any(|s| s.contains("not attached to any insight")));
     }
 
     #[test]
     fn hygiene_no_unlinked_when_bundled() {
         let g = KnowledgeGraph {
             nodes: vec![
-                mk("E", NodeType::Erkenntnis, "insight"),
-                mk("a", NodeType::Beobachtung, "x"),
-                mk("b", NodeType::Recherche, "y"),
+                mk("E", NodeType::Insight, "insight"),
+                mk("a", NodeType::Observation, "x"),
+                mk("b", NodeType::Research, "y"),
             ],
-            edges: vec![ed("E", "a", "stuetzt"), ed("E", "b", "stuetzt")],
+            edges: vec![ed("E", "a", "supports"), ed("E", "b", "supports")],
             fragen: vec![],
             quellen: vec![],
         };
-        assert!(!hygiene_hints(&g).iter().any(|s| s.contains("keiner Erkenntnis")));
+        assert!(!hygiene_hints(&g).iter().any(|s| s.contains("not attached to any insight")));
     }
 
     #[test]
@@ -1478,33 +1501,33 @@ mod tests {
             }],
             quellen: vec![],
         };
-        assert!(hygiene_hints(&g).iter().any(|s| s.contains("konkurrierende Werte")));
+        assert!(hygiene_hints(&g).iter().any(|s| s.contains("competing values")));
     }
 
     #[test]
     fn hygiene_flags_conflicting_support() {
         let g = KnowledgeGraph {
             nodes: vec![
-                mk("E", NodeType::Erkenntnis, "claim"),
-                mk("a", NodeType::Beobachtung, "pro"),
-                mk("b", NodeType::Beobachtung, "con"),
+                mk("E", NodeType::Insight, "claim"),
+                mk("a", NodeType::Observation, "pro"),
+                mk("b", NodeType::Observation, "con"),
             ],
-            edges: vec![ed("E", "a", "stuetzt"), ed("E", "b", "widerspricht")],
+            edges: vec![ed("E", "a", "supports"), ed("E", "b", "contradicts")],
             fragen: vec![],
             quellen: vec![],
         };
-        assert!(hygiene_hints(&g).iter().any(|s| s.contains("Widerspruch sichtbar")));
+        assert!(hygiene_hints(&g).iter().any(|s| s.contains("conflict visible")));
     }
 
     #[test]
     fn hygiene_flags_duplicates() {
         let g = KnowledgeGraph {
-            nodes: vec![mk("a", NodeType::Beobachtung, "Same Thing"), mk("b", NodeType::Beobachtung, "same thing")],
+            nodes: vec![mk("a", NodeType::Observation, "Same Thing"), mk("b", NodeType::Observation, "same thing")],
             edges: vec![],
             fragen: vec![],
             quellen: vec![],
         };
-        assert!(hygiene_hints(&g).iter().any(|s| s.contains("Dublette")));
+        assert!(hygiene_hints(&g).iter().any(|s| s.contains("Possible duplicate")));
     }
 
     #[test]
@@ -1517,10 +1540,10 @@ mod tests {
     #[test]
     fn update_node_changes_fields() {
         let dir = temp_dir();
-        let n = add_node(&dir, NodeType::Vermutung, "alt".into(), "warum", None, "manual").unwrap();
-        let upd = update_node(&dir, &n.id, Some("neu".into()), Some("warum neu".into()), Some(NodeType::Beobachtung), Some(0.8), None, None, None, None).unwrap();
+        let n = add_node(&dir, NodeType::Hypothesis, "alt".into(), "warum", None, "manual").unwrap();
+        let upd = update_node(&dir, &n.id, Some("neu".into()), Some("warum neu".into()), Some(NodeType::Observation), Some(0.8), None, None, None, None).unwrap();
         assert_eq!(upd.inhalt, "neu");
-        assert_eq!(upd.typ, NodeType::Beobachtung);
+        assert_eq!(upd.typ, NodeType::Observation);
         assert_eq!(upd.basis_score, 0.8);
         assert_eq!(upd.score, 0.8); // stub: score == basis_score
         std::fs::remove_dir_all(&dir).ok();
@@ -1529,9 +1552,9 @@ mod tests {
     #[test]
     fn delete_node_removes_node_and_its_edges() {
         let dir = temp_dir();
-        let a = add_node(&dir, NodeType::Erkenntnis, "E".into(), "warum", None, "manual").unwrap();
-        let b = add_node(&dir, NodeType::Beobachtung, "B".into(), "warum", None, "manual").unwrap();
-        add_edge(&dir, &a.id, &b.id, "stuetzt", None).unwrap();
+        let a = add_node(&dir, NodeType::Insight, "E".into(), "warum", None, "manual").unwrap();
+        let b = add_node(&dir, NodeType::Observation, "B".into(), "warum", None, "manual").unwrap();
+        add_edge(&dir, &a.id, &b.id, "supports", None).unwrap();
         delete_node(&dir, &b.id).unwrap();
         let g = query(&dir);
         assert_eq!(g.nodes.len(), 1);
@@ -1542,9 +1565,9 @@ mod tests {
     #[test]
     fn delete_edge_removes_only_that_edge() {
         let dir = temp_dir();
-        let a = add_node(&dir, NodeType::Erkenntnis, "E".into(), "warum", None, "manual").unwrap();
-        let b = add_node(&dir, NodeType::Beobachtung, "B".into(), "warum", None, "manual").unwrap();
-        let e = add_edge(&dir, &a.id, &b.id, "stuetzt", None).unwrap();
+        let a = add_node(&dir, NodeType::Insight, "E".into(), "warum", None, "manual").unwrap();
+        let b = add_node(&dir, NodeType::Observation, "B".into(), "warum", None, "manual").unwrap();
+        let e = add_edge(&dir, &a.id, &b.id, "supports", None).unwrap();
         delete_edge(&dir, &e.id).unwrap();
         let g = query(&dir);
         assert_eq!(g.nodes.len(), 2, "nodes stay");
@@ -1567,7 +1590,7 @@ mod tests {
         n
     }
     fn fakt(id: &str, frage: &str, wert: &str, basis: f64) -> Node {
-        let mut n = mk(id, NodeType::Fakt, &format!("fakt {wert}"));
+        let mut n = mk(id, NodeType::Fact, &format!("fakt {wert}"));
         n.basis_score = basis;
         n.frage_id = Some(frage.into());
         n.wert = Some(wert.into());
@@ -1581,55 +1604,55 @@ mod tests {
     fn engine_worked_example_gestuetzt() {
         let mut g = KnowledgeGraph {
             nodes: vec![
-                mk("D1", NodeType::Entscheidung, "decide"),
-                mk("E1", NodeType::Erkenntnis, "insight"),
-                leaf("B1", NodeType::Beobachtung, 0.9),
-                leaf("R1", NodeType::Recherche, 0.7),
-                leaf("V1", NodeType::Vermutung, 0.3),
+                mk("D1", NodeType::Decision, "decide"),
+                mk("E1", NodeType::Insight, "insight"),
+                leaf("B1", NodeType::Observation, 0.9),
+                leaf("R1", NodeType::Research, 0.7),
+                leaf("V1", NodeType::Hypothesis, 0.3),
             ],
             edges: vec![
-                ed("D1", "E1", "stuetzt"),
-                ed("E1", "B1", "stuetzt"),
-                ed("E1", "R1", "stuetzt"),
-                ed("E1", "V1", "stuetzt"),
+                ed("D1", "E1", "supports"),
+                ed("E1", "B1", "supports"),
+                ed("E1", "R1", "supports"),
+                ed("E1", "V1", "supports"),
             ],
             fragen: vec![],
             quellen: vec![],
         };
         recompute_scores(&mut g);
         assert_eq!(by(&g, "B1").score, 0.9);
-        assert_eq!(by(&g, "B1").status, "gestützt"); // uncontested leaf
+        assert_eq!(by(&g, "B1").status, "supported"); // uncontested leaf
         assert!((by(&g, "E1").score - 1.9 / 2.9).abs() < 1e-6, "E1={}", by(&g, "E1").score);
-        assert_eq!(by(&g, "E1").status, "gestützt");
-        // D1 (entscheidung) keeps a groundedness SCORE below E1, but its STATUS is
-        // the lifecycle "aktiv" (decisions aren't belief-scored as gestützt/unbelegt).
+        assert_eq!(by(&g, "E1").status, "supported");
+        // D1 (decision) keeps a groundedness SCORE below E1, but its STATUS is
+        // the lifecycle "active" (decisions aren't belief-scored as supported/unsupported).
         assert!(by(&g, "D1").score > 0.0 && by(&g, "D1").score < by(&g, "E1").score);
-        assert_eq!(by(&g, "D1").status, "aktiv");
+        assert_eq!(by(&g, "D1").status, "active");
     }
 
     #[test]
     fn engine_contradiction_makes_umstritten() {
         let mut g = KnowledgeGraph {
             nodes: vec![
-                mk("E1", NodeType::Erkenntnis, "insight"),
-                leaf("B1", NodeType::Beobachtung, 0.9),
-                leaf("R1", NodeType::Recherche, 0.7),
-                leaf("V1", NodeType::Vermutung, 0.3),
-                leaf("B2", NodeType::Beobachtung, 0.9),
+                mk("E1", NodeType::Insight, "insight"),
+                leaf("B1", NodeType::Observation, 0.9),
+                leaf("R1", NodeType::Research, 0.7),
+                leaf("V1", NodeType::Hypothesis, 0.3),
+                leaf("B2", NodeType::Observation, 0.9),
             ],
             edges: vec![
-                ed("E1", "B1", "stuetzt"),
-                ed("E1", "R1", "stuetzt"),
-                ed("E1", "V1", "stuetzt"),
-                ed("E1", "B2", "widerspricht"),
+                ed("E1", "B1", "supports"),
+                ed("E1", "R1", "supports"),
+                ed("E1", "V1", "supports"),
+                ed("E1", "B2", "contradicts"),
             ],
             fragen: vec![],
             quellen: vec![],
         };
         recompute_scores(&mut g);
-        // pro=1.9, con=0.9 → score 1.9/3.8 = 0.5, r=0.9/2.8≈0.32 → umstritten
+        // pro=1.9, con=0.9 → score 1.9/3.8 = 0.5, r=0.9/2.8≈0.32 → disputed
         assert!((by(&g, "E1").score - 0.5).abs() < 1e-6, "E1={}", by(&g, "E1").score);
-        assert_eq!(by(&g, "E1").status, "umstritten");
+        assert_eq!(by(&g, "E1").status, "disputed");
     }
 
     #[test]
@@ -1642,7 +1665,7 @@ mod tests {
         };
         recompute_scores(&mut g);
         for n in &g.nodes {
-            assert_eq!(n.status, "umstritten");
+            assert_eq!(n.status, "disputed");
             assert!((n.score - 0.95 / 2.9).abs() < 1e-6, "score={}", n.score);
         }
     }
@@ -1657,7 +1680,7 @@ mod tests {
         };
         recompute_scores(&mut g);
         for n in &g.nodes {
-            assert_eq!(n.status, "gestützt");
+            assert_eq!(n.status, "supported");
             assert!((n.score - 1.9 / 2.9).abs() < 1e-6, "score={}", n.score);
         }
     }
@@ -1665,25 +1688,25 @@ mod tests {
     #[test]
     fn engine_insight_without_evidence_is_unbelegt() {
         let mut g = KnowledgeGraph {
-            nodes: vec![mk("E", NodeType::Erkenntnis, "x")],
+            nodes: vec![mk("E", NodeType::Insight, "x")],
             edges: vec![],
             fragen: vec![],
             quellen: vec![],
         };
         recompute_scores(&mut g);
-        assert_eq!(by(&g, "E").status, "unbelegt");
+        assert_eq!(by(&g, "E").status, "unsupported");
         assert_eq!(by(&g, "E").score, 0.0);
     }
 
     #[test]
     fn engine_standalone_fakt_scores_basis() {
         // A Fakt without a Frage (optional now) scores like a leaf = its basis.
-        let mut f = mk("F", NodeType::Fakt, "Python is 3.12");
+        let mut f = mk("F", NodeType::Fact, "Python is 3.12");
         f.basis_score = 0.95;
         let mut g = KnowledgeGraph { nodes: vec![f], edges: vec![], fragen: vec![], quellen: vec![] };
         recompute_scores(&mut g);
         assert_eq!(g.nodes[0].score, 0.95);
-        assert_eq!(g.nodes[0].status, "gestützt");
+        assert_eq!(g.nodes[0].status, "supported");
     }
 
     // ---- query filter (read-side) ----
@@ -1692,11 +1715,11 @@ mod tests {
     fn filter_by_keyword_includes_neighbor() {
         let g = KnowledgeGraph {
             nodes: vec![
-                mk("E", NodeType::Erkenntnis, "rain insight"),
-                mk("B", NodeType::Beobachtung, "street is wet"),
-                mk("X", NodeType::Beobachtung, "unrelated stuff"),
+                mk("E", NodeType::Insight, "rain insight"),
+                mk("B", NodeType::Observation, "street is wet"),
+                mk("X", NodeType::Observation, "unrelated stuff"),
             ],
-            edges: vec![ed("E", "B", "stuetzt")],
+            edges: vec![ed("E", "B", "supports")],
             fragen: vec![],
             quellen: vec![],
         };
@@ -1711,33 +1734,33 @@ mod tests {
     #[test]
     fn filter_by_type() {
         let g = KnowledgeGraph {
-            nodes: vec![mk("E", NodeType::Erkenntnis, "i"), mk("B", NodeType::Beobachtung, "b")],
+            nodes: vec![mk("E", NodeType::Insight, "i"), mk("B", NodeType::Observation, "b")],
             edges: vec![],
             fragen: vec![],
             quellen: vec![],
         };
-        let view = apply_filter(&g, &QueryFilter { typ: Some(NodeType::Erkenntnis), ..Default::default() });
+        let view = apply_filter(&g, &QueryFilter { typ: Some(NodeType::Insight), ..Default::default() });
         assert_eq!(view.nodes.len(), 1);
         assert_eq!(view.nodes[0].id, "E");
     }
 
     #[test]
     fn filter_by_status() {
-        let mut a = mk("A", NodeType::Beobachtung, "a");
-        a.status = "umstritten".into();
-        let g = KnowledgeGraph { nodes: vec![a, mk("B", NodeType::Beobachtung, "b")], edges: vec![], fragen: vec![], quellen: vec![] };
-        let view = apply_filter(&g, &QueryFilter { status: Some("umstritten".into()), ..Default::default() });
+        let mut a = mk("A", NodeType::Observation, "a");
+        a.status = "disputed".into();
+        let g = KnowledgeGraph { nodes: vec![a, mk("B", NodeType::Observation, "b")], edges: vec![], fragen: vec![], quellen: vec![] };
+        let view = apply_filter(&g, &QueryFilter { status: Some("disputed".into()), ..Default::default() });
         assert_eq!(view.nodes.len(), 1);
         assert_eq!(view.nodes[0].id, "A");
     }
 
     #[test]
     fn filter_limit_keeps_top_by_score() {
-        let mut a = mk("A", NodeType::Beobachtung, "keyword a");
+        let mut a = mk("A", NodeType::Observation, "keyword a");
         a.score = 0.9;
-        let mut b = mk("B", NodeType::Beobachtung, "keyword b");
+        let mut b = mk("B", NodeType::Observation, "keyword b");
         b.score = 0.5;
-        let mut c = mk("C", NodeType::Beobachtung, "keyword c");
+        let mut c = mk("C", NodeType::Observation, "keyword c");
         c.score = 0.1;
         let g = KnowledgeGraph { nodes: vec![a, b, c], edges: vec![], fragen: vec![], quellen: vec![] };
         let view = apply_filter(&g, &QueryFilter { q: Some("keyword".into()), limit: Some(2), ..Default::default() });
@@ -1748,7 +1771,7 @@ mod tests {
     #[test]
     fn filter_inactive_returns_all() {
         let g = KnowledgeGraph {
-            nodes: vec![mk("A", NodeType::Beobachtung, "a"), mk("B", NodeType::Beobachtung, "b")],
+            nodes: vec![mk("A", NodeType::Observation, "a"), mk("B", NodeType::Observation, "b")],
             edges: vec![],
             fragen: vec![],
             quellen: vec![],
@@ -1758,9 +1781,9 @@ mod tests {
 
     #[test]
     fn filter_by_tags_matches_any() {
-        let mut a = mk("A", NodeType::Beobachtung, "a");
+        let mut a = mk("A", NodeType::Observation, "a");
         a.tags = vec!["voxel".into()];
-        let mut b = mk("B", NodeType::Beobachtung, "b");
+        let mut b = mk("B", NodeType::Observation, "b");
         b.tags = vec!["pathfinding".into()];
         let g = KnowledgeGraph { nodes: vec![a, b], edges: vec![], fragen: vec![], quellen: vec![] };
         let f = QueryFilter { tags: vec!["VOXEL".into()], ..Default::default() };
@@ -1773,15 +1796,15 @@ mod tests {
     fn get_subgraph_pulls_neighbourhood_to_depth() {
         let g = KnowledgeGraph {
             nodes: vec![
-                mk("E", NodeType::Erkenntnis, "claim"),
-                mk("B", NodeType::Beobachtung, "obs"),
-                mk("X", NodeType::Vermutung, "far"),
+                mk("E", NodeType::Insight, "claim"),
+                mk("B", NodeType::Observation, "obs"),
+                mk("X", NodeType::Hypothesis, "far"),
             ],
             edges: vec![Edge {
                 id: "e1".into(),
                 von: "E".into(),
                 zu: "B".into(),
-                polaritaet: "stuetzt".into(),
+                polaritaet: "supports".into(),
                 gewicht: 1.0,
             }],
             fragen: vec![],
@@ -1798,27 +1821,27 @@ mod tests {
     #[test]
     fn entscheidung_without_evidence_is_aktiv_not_unbelegt() {
         let mut g = KnowledgeGraph {
-            nodes: vec![mk("D", NodeType::Entscheidung, "use X")],
+            nodes: vec![mk("D", NodeType::Decision, "use X")],
             edges: vec![],
             fragen: vec![],
             quellen: vec![],
         };
         recompute_scores(&mut g);
-        assert_eq!(g.nodes[0].status, "aktiv");
+        assert_eq!(g.nodes[0].status, "active");
     }
 
     #[test]
     fn ersetzt_edge_retires_old_keeps_new_aktiv() {
         let mut g = KnowledgeGraph {
             nodes: vec![
-                mk("ALT", NodeType::Entscheidung, "old"),
-                mk("NEU", NodeType::Entscheidung, "new"),
+                mk("ALT", NodeType::Decision, "old"),
+                mk("NEU", NodeType::Decision, "new"),
             ],
             edges: vec![Edge {
                 id: "e".into(),
                 von: "NEU".into(),
                 zu: "ALT".into(),
-                polaritaet: "ersetzt".into(),
+                polaritaet: "replaces".into(),
                 gewicht: 1.0,
             }],
             fragen: vec![],
@@ -1826,30 +1849,30 @@ mod tests {
         };
         recompute_scores(&mut g);
         let st = |id: &str| g.nodes.iter().find(|n| n.id == id).unwrap().status.clone();
-        assert_eq!(st("ALT"), "überholt");
-        assert_eq!(st("NEU"), "aktiv");
+        assert_eq!(st("ALT"), "superseded");
+        assert_eq!(st("NEU"), "active");
     }
 
     #[test]
     fn ueberholt_flag_retires_any_node() {
-        let mut a = mk("A", NodeType::Erkenntnis, "claim");
+        let mut a = mk("A", NodeType::Insight, "claim");
         a.ueberholt = true;
         let mut g = KnowledgeGraph { nodes: vec![a], edges: vec![], fragen: vec![], quellen: vec![] };
         recompute_scores(&mut g);
-        assert_eq!(g.nodes[0].status, "überholt");
+        assert_eq!(g.nodes[0].status, "superseded");
     }
 
     #[test]
     fn erledigt_flag_marks_done_ueberholt_wins() {
-        let mut d = mk("D", NodeType::Entscheidung, "do X");
+        let mut d = mk("D", NodeType::Decision, "do X");
         d.erledigt = true;
         let mut g = KnowledgeGraph { nodes: vec![d], edges: vec![], fragen: vec![], quellen: vec![] };
         recompute_scores(&mut g);
-        assert_eq!(g.nodes[0].status, "erledigt");
+        assert_eq!(g.nodes[0].status, "done");
         // überholt takes precedence over erledigt.
         g.nodes[0].ueberholt = true;
         recompute_scores(&mut g);
-        assert_eq!(g.nodes[0].status, "überholt");
+        assert_eq!(g.nodes[0].status, "superseded");
     }
 
     // ---- resolve / dedup / merge ----
@@ -1857,7 +1880,7 @@ mod tests {
     #[test]
     fn resolve_ref_by_id_and_unique_title() {
         let g = KnowledgeGraph {
-            nodes: vec![mk("n1", NodeType::Beobachtung, "uses Phaser 4")],
+            nodes: vec![mk("n1", NodeType::Observation, "uses Phaser 4")],
             edges: vec![],
             fragen: vec![],
             quellen: vec![],
@@ -1870,22 +1893,22 @@ mod tests {
     #[test]
     fn find_duplicate_matches_normalized_same_type_only() {
         let g = KnowledgeGraph {
-            nodes: vec![mk("n1", NodeType::Fakt, "Uses   Python 3.12")],
+            nodes: vec![mk("n1", NodeType::Fact, "Uses   Python 3.12")],
             edges: vec![],
             fragen: vec![],
             quellen: vec![],
         };
-        assert_eq!(find_duplicate(&g, NodeType::Fakt, "uses python 3.12").as_deref(), Some("n1"));
-        assert_eq!(find_duplicate(&g, NodeType::Beobachtung, "uses python 3.12"), None);
+        assert_eq!(find_duplicate(&g, NodeType::Fact, "uses python 3.12").as_deref(), Some("n1"));
+        assert_eq!(find_duplicate(&g, NodeType::Observation, "uses python 3.12"), None);
     }
 
     #[test]
     fn merge_nodes_repoints_edges_and_unions_tags() {
         let dir = temp_dir();
-        let keep = add_node(&dir, NodeType::Erkenntnis, "insight".into(), "warum", None, "manual").unwrap();
-        let dup = add_node(&dir, NodeType::Erkenntnis, "insight dup".into(), "warum", None, "manual").unwrap();
-        let ev = add_node(&dir, NodeType::Beobachtung, "obs".into(), "warum", None, "manual").unwrap();
-        add_edge(&dir, &dup.id, &ev.id, "stuetzt", None).unwrap();
+        let keep = add_node(&dir, NodeType::Insight, "insight".into(), "warum", None, "manual").unwrap();
+        let dup = add_node(&dir, NodeType::Insight, "insight dup".into(), "warum", None, "manual").unwrap();
+        let ev = add_node(&dir, NodeType::Observation, "obs".into(), "warum", None, "manual").unwrap();
+        add_edge(&dir, &dup.id, &ev.id, "supports", None).unwrap();
         update_node(&dir, &dup.id, None, None, None, None, None, Some(vec!["voxel".into()]), None, None).unwrap();
         merge_nodes(&dir, &dup.id, &keep.id).unwrap();
         let g = query(&dir);
@@ -1939,7 +1962,7 @@ mod tests {
             datum: "2026-06-04T12:34:56+00:00".into(),
             basis_score: 0.73,
             score: 0.61,
-            status: "gestützt".into(),
+            status: "supported".into(),
             herkunft: "session".into(),
             frage_id: Some("frage-x".into()),
             wert: Some("3.12".into()),
@@ -1967,18 +1990,18 @@ mod tests {
         assert_eq!(a.session_id, b.session_id, "session_id");
         assert_eq!(a.tags, b.tags, "tags");
         assert_eq!(a.ueberholt, b.ueberholt, "ueberholt");
-        assert_eq!(a.erledigt, b.erledigt, "erledigt");
+        assert_eq!(a.erledigt, b.erledigt, "done");
     }
 
     #[test]
     fn node_md_roundtrips_every_field_for_each_type() {
         for typ in [
-            NodeType::Entscheidung,
-            NodeType::Erkenntnis,
-            NodeType::Fakt,
-            NodeType::Beobachtung,
-            NodeType::Recherche,
-            NodeType::Vermutung,
+            NodeType::Decision,
+            NodeType::Insight,
+            NodeType::Fact,
+            NodeType::Observation,
+            NodeType::Research,
+            NodeType::Hypothesis,
         ] {
             let n = full_node("id-1", typ);
             let md = serialize_node_md(&n);
@@ -1991,13 +2014,13 @@ mod tests {
     fn node_md_roundtrips_minimal_optionals_absent() {
         let n = Node {
             id: "minimal".into(),
-            typ: NodeType::Vermutung,
+            typ: NodeType::Hypothesis,
             inhalt: "x".into(),
             begruendung: "y".into(),
             datum: "2026-01-01T00:00:00Z".into(),
             basis_score: 0.3,
             score: 0.3,
-            status: "gestützt".into(),
+            status: "supported".into(),
             herkunft: "manual".into(),
             frage_id: None,
             wert: None,
@@ -2015,9 +2038,9 @@ mod tests {
     fn store_roundtrips_via_save_load_layout() {
         let dir = temp_dir();
         // Build a graph through the public API, then verify load_layout reproduces it.
-        let a = add_node(&dir, NodeType::Erkenntnis, "insight".into(), "warum", None, "session").unwrap();
-        let b = add_node(&dir, NodeType::Beobachtung, "obs".into(), "warum", None, "session").unwrap();
-        add_edge(&dir, &a.id, &b.id, "stuetzt", None).unwrap();
+        let a = add_node(&dir, NodeType::Insight, "insight".into(), "warum", None, "session").unwrap();
+        let b = add_node(&dir, NodeType::Observation, "obs".into(), "warum", None, "session").unwrap();
+        add_edge(&dir, &a.id, &b.id, "supports", None).unwrap();
         let _f = add_fact(&dir, "Frage?", "3.12", "fakt".into(), "woher", None, "session").unwrap();
         set_quellen(&dir, vec![Quelle {
             id: "p".into(),
@@ -2038,7 +2061,7 @@ mod tests {
         assert_eq!(g.fragen.len(), 1);
         assert_eq!(g.quellen.len(), 1);
         // Edge/frage/quelle fields intact.
-        assert_eq!(g.edges[0].polaritaet, "stuetzt");
+        assert_eq!(g.edges[0].polaritaet, "supports");
         assert_eq!(g.fragen[0].inhalt, "Frage?");
         assert_eq!(g.quellen[0].titel, "T");
         std::fs::remove_dir_all(&dir).ok();
@@ -2047,7 +2070,7 @@ mod tests {
     #[test]
     fn delete_node_removes_its_md_file() {
         let dir = temp_dir();
-        let a = add_node(&dir, NodeType::Beobachtung, "gone".into(), "warum", None, "manual").unwrap();
+        let a = add_node(&dir, NodeType::Observation, "gone".into(), "warum", None, "manual").unwrap();
         let path = dir.join("nodes").join(format!("{}.md", a.id));
         assert!(path.exists());
         delete_node(&dir, &a.id).unwrap();
@@ -2058,8 +2081,8 @@ mod tests {
     #[test]
     fn merge_removes_source_md_file() {
         let dir = temp_dir();
-        let keep = add_node(&dir, NodeType::Erkenntnis, "keep".into(), "warum", None, "manual").unwrap();
-        let dup = add_node(&dir, NodeType::Erkenntnis, "dup".into(), "warum", None, "manual").unwrap();
+        let keep = add_node(&dir, NodeType::Insight, "keep".into(), "warum", None, "manual").unwrap();
+        let dup = add_node(&dir, NodeType::Insight, "dup".into(), "warum", None, "manual").unwrap();
         let dup_path = dir.join("nodes").join(format!("{}.md", dup.id));
         assert!(dup_path.exists());
         merge_nodes(&dir, &dup.id, &keep.id).unwrap();
@@ -2090,7 +2113,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
         let dir = temp_dir();
-        let a = add_node(&dir, NodeType::Beobachtung, "v0".into(), "warum", None, "session").unwrap();
+        let a = add_node(&dir, NodeType::Observation, "v0".into(), "warum", None, "session").unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let writer_dir = dir.clone();
         let writer_id = a.id.clone();

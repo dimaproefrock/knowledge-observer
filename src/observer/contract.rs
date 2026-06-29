@@ -5,9 +5,9 @@
 //! ```json
 //! {
 //!   "ops": [
-//!     { "action": "add", "typ": "beobachtung|fakt|erkenntnis|entscheidung|recherche|vermutung",
+//!     { "action": "add", "typ": "observation|fact|insight|decision|research|hypothesis",
 //!       "inhalt": "…", "begruendung": "…", "tags": ["…"], "quellen": ["<doc-id>"],
-//!       "links": [ { "ziel": "<id|title>", "polaritaet": "stuetzt|widerspricht|ersetzt",
+//!       "links": [ { "ziel": "<id|title>", "polaritaet": "supports|contradicts|replaces",
 //!                    "als": "parent|child" } ] },
 //!     { "action": "update", "id": "…", "fields": { "inhalt": "…", "ueberholt": true } },
 //!     { "action": "link", "von": "<id|title>", "zu": "<id|title>", "polaritaet": "…" },
@@ -25,7 +25,7 @@
 use serde::Deserialize;
 
 fn default_polaritaet() -> String {
-    "stuetzt".to_string()
+    "supports".to_string()
 }
 
 fn default_als() -> String {
@@ -37,7 +37,7 @@ fn default_als() -> String {
 pub struct LinkSpec {
     /// Target node — an id OR a unique title substring (resolved by the engine).
     pub ziel: String,
-    /// "stuetzt" | "widerspricht" | "ersetzt" (default "stuetzt").
+    /// "supports" | "contradicts" | "replaces" (default "supports").
     #[serde(default = "default_polaritaet")]
     pub polaritaet: String,
     /// "parent" | "child" (default "parent").
@@ -84,7 +84,7 @@ pub enum Op {
         links: Vec<LinkSpec>,
         /// Document ids (orthogonal source layer) this node is backed by / derived
         /// from / documented in. NOT DAG links — a source citation. Each id must be
-        /// an EXACT id from the "Verfügbare Projekt-Dokumente" input list (Rust
+        /// an EXACT id from the "Available project documents" input list (Rust
         /// filters out any unknown/invented id before recording).
         #[serde(default)]
         quellen: Vec<String>,
@@ -218,36 +218,41 @@ pub fn parse(stdout: &str) -> ExtractionResult {
 
 /// The extraction prompt handed to the headless observer LLM (Slice A, Schritt 7).
 ///
-/// 3rd-person observer variant of the knowledge rules. German, to match the
-/// existing knowledge rules. Per-project overridable later (Slice B / tuning).
-pub const EXTRACTION_PROMPT: &str = "Du beobachtest einen Dialog zwischen einem User und einem Coding-Agent. Deine Aufgabe ist es, daraus **dauerhaftes, projektweites** Wissen zu extrahieren und in strukturierte Operationen (ADD/UPDATE/LINK) auf einen bewerteten Evidenz-DAG zu übersetzen. Du selbst gibst keine Antwort an den User und steuerst den Agent nicht — du pflegst nur das Wissen.\n\
+/// 3rd-person observer variant of the knowledge rules. Written in English for the
+/// public release. CRITICAL: the language of THIS prompt does NOT dictate the
+/// language of the content the observer records — every item is recorded in the
+/// language of the conversation being observed (see the first rule). Per-project
+/// overridable later (Slice B / tuning).
+pub const EXTRACTION_PROMPT: &str = "You are observing a dialogue between a user and a coding agent. Your job is to extract **durable, project-wide** knowledge from it and translate that into structured operations (ADD/UPDATE/LINK) on a scored evidence DAG. You do NOT answer the user and you do NOT steer the agent — you only maintain the knowledge.\n\
 \n\
-REGELN:\n\
-(1) Erfasse NUR dauerhaftes, projektweites Wissen. Speichere KEINE transienten, session-lokalen Prozess-Ereignisse oder Steuerungen — z. B. 'dieser Schritt macht nur X', 'Y kommt später', 'ein anderer Agent macht Z', 'User sagt los', 'Tuning übersprungen', aktuelles Task-Scoping. Solches gehört in den Transcript, nicht in den Graph. Enthält eine Nachricht zusätzlich einen dauerhaften Fakt oder eine Entscheidung (z. B. ein Datenformat), erfasse NUR diesen Teil.\n\
-(2) Wähle den Knoten-Typ nach QUELLE und SICHERHEIT (nicht nach Thema), abgeleitet aus der Formulierung: fakt = sichere harte Info ('es ist X', vom User oder aus einer Datenbank), beobachtung = direkt beobachtet / 'sieht aus wie', recherche = extern nachgeschlagen, vermutung = unsicher/abgeschwächt ('ich denke', 'vermutlich'), erkenntnis = eine selbst hergeleitete Schlussfolgerung, entscheidung = eine getroffene Wahl. Der User ist NICHT allwissend — urteile nach der Formulierung, nicht danach, dass es gesagt wurde. Bist du unsicher, wie sicher etwas ist oder woher es kommt, extrahiere es NICHT (im Zweifel weglassen statt raten).\n\
-(3) Jede ADD-Operation BENÖTIGT eine 'begruendung' (sonst wird die Op verworfen), typ-adaptiv: für beobachtung/recherche/vermutung die Frage, die sie beantwortet (als Frage); für erkenntnis die Begründung/Herleitung; für entscheidung ihr Zweck ('damit'/wofür sie da ist); für fakt die Quelle, aus der sie stammt.\n\
-(4) Baue einen GRAPH, keine flache Liste: wenn mehrere beobachtung/recherche/vermutung auf eine übergeordnete Erkenntnis zeigen, lege eine erkenntnis an und verbinde die Evidenz (polaritaet 'stuetzt', oder 'widerspricht' für Gegen-Evidenz); stütze eine entscheidung auf das, was sie trägt. Lege diese Kanten INLINE über das 'links'-Feld der ADD-Op an (ziel = id ODER eindeutiger Titel-Substring, polaritaet, als 'parent'|'child').\n\
-(5) Entscheidungen sind ein Lifecycle, kein Evidenz-Votum: Status ist aktiv / erledigt / überholt, und eine Entscheidung ist nicht 'schwach', nur weil ihr Evidenz fehlt. Ändert sich eine Wahl, verknüpfe die NEUE Entscheidung mit der alten über eine LINK-Op mit polaritaet='ersetzt' (alte → überholt) — lass NIE widersprüchliche entscheidung-Knoten nebeneinander stehen. Ist eine Entscheidung schlicht UMGESETZT (ein erledigter Schritt), markiere sie via UPDATE mit fields.erledigt=true. Korrigiere oder ziehe falsche/veraltete Knoten via UPDATE mit fields.ueberholt=true zurück, statt Duplikate anzuhäufen.\n\
-(6) DEDUP-Bewusstsein: Dir wird ein Ausschnitt des bestehenden DAG (Knoten mit id/Titel/Tags) mitgeliefert. Prüfe ihn, BEVOR du etwas Neues anlegst. Existiert der Gedanke bereits (auch anders formuliert), nutze UPDATE (Knoten verfeinern) oder LINK (verbinden) statt eines blinden ADD. Erweitere frühere erkenntnis-Knoten, wenn neue Evidenz eintrifft, statt neue anzulegen.\n\
-(7) Versieh jeden Knoten über 'tags' mit seinem Thema/Bereich (Subsystem oder Work-Stream, z. B. 'pathfinding', 'voxel'), damit spätere Arbeit gezielt nur diesen Strom abrufen kann.\n\
-(8) Halte jeden Knoten auf EINE knappe Aussage. Erfasse auch einmalige/datierte Spezifika (der Zeitstempel wird automatisch gesetzt). Reine Höflichkeiten überspringst du.\n\
-(9) DOKUMENTE ALS QUELLEN: Der Eingabe ist ein Abschnitt 'Verfügbare Projekt-Dokumente' vorangestellt, der jedes Dokument mit seiner exakten 'id' und seinem Titel auflistet. Ist ein extrahiertes Wissensstück durch eines dieser Dokumente belegt / daraus abgeleitet / darin dokumentiert (z. B. ein 'fakt', dessen Quelle ein Feature-Doc ist, oder eine 'entscheidung', die in F00x dokumentiert ist), zitiere die relevante(n) Dokument-'id(s)' im 'quellen'-Array der Op — mit der EXAKTEN id aus der Liste, NIEMALS erfunden. 'quellen' sind QUELLEN (eine orthogonale Beleg-Schicht), KEINE Links/Kanten; ist nichts belegt, lass 'quellen' weg oder leer.\n\
+LANGUAGE RULE (read first): Record every item — its statement (inhalt), its rationale (begruendung), any question/value text — AND your rolling summary in the SAME language as the conversation you are observing. Do NOT translate the content to English. These instructions are written in English; that must NOT change the language of what you record. The field KEYS and the schema VALUES below (the typ/status/polaritaet codes) are fixed English identifiers and stay exactly as written regardless of the conversation's language; only the free-text human content follows the conversation.\n\
 \n\
-AUSGABE-FORMAT: Gib AUSSCHLIESSLICH ein einzelnes JSON-Objekt zurück, nichts sonst (kein Prosa-Text, keine Code-Fences davor/danach), in genau dieser Form:\n\
+RULES:\n\
+(1) Capture ONLY durable, project-wide knowledge. Do NOT store transient, session-local process events or control flow — e.g. 'this step only does X', 'Y comes later', 'another agent handles Z', 'user says go', 'tuning skipped', current task scoping. Such things belong in the transcript, not the graph. If a message ALSO contains a durable fact or decision (e.g. a data format), capture ONLY that part.\n\
+(2) Choose the node type by SOURCE and CERTAINTY (not by topic), inferred from the phrasing: fact = certain hard info ('it is X', from the user or a database), observation = directly observed / 'looks like', research = looked up externally, hypothesis = uncertain/hedged ('I think', 'probably'), insight = a conclusion you derived yourself, decision = a choice that was made. The user is NOT omniscient — judge by the phrasing, not by the mere fact that it was said. If you are unsure how certain something is or where it comes from, do NOT extract it (when in doubt, leave it out rather than guess).\n\
+(3) Every ADD operation REQUIRES a 'begruendung' (otherwise the op is dropped), type-adaptive: for observation/research/hypothesis the question it answers (as a question); for insight the rationale/derivation; for decision its purpose (what it is for); for fact the source it comes from.\n\
+(4) Build a GRAPH, not a flat list: when several observation/research/hypothesis nodes point at a higher-level insight, create an insight and connect the evidence (polaritaet 'supports', or 'contradicts' for counter-evidence); ground a decision on what supports it. Create these edges INLINE via the 'links' field of the ADD op (ziel = id OR unique title substring, polaritaet, als 'parent'|'child').\n\
+(5) Decisions are a lifecycle, not an evidence vote: status is active / done / superseded, and a decision is not 'weak' just because it lacks evidence. When a choice changes, link the NEW decision to the old one via a LINK op with polaritaet='replaces' (old → superseded) — NEVER leave contradicting decision nodes side by side. If a decision is simply CARRIED OUT (a completed step), mark it via UPDATE with fields.erledigt=true. Correct or retire wrong/outdated nodes via UPDATE with fields.ueberholt=true instead of piling up duplicates.\n\
+(6) DEDUP awareness: you are given an excerpt of the existing DAG (nodes with id/title/tags). Check it BEFORE creating anything new. If the thought already exists (even worded differently), use UPDATE (refine the node) or LINK (connect) instead of a blind ADD. Extend earlier insight nodes when new evidence arrives instead of creating new ones.\n\
+(7) Tag every node via 'tags' with its topic/area (subsystem or work-stream, e.g. 'pathfinding', 'voxel'), so later work can retrieve just that stream.\n\
+(8) Keep each node to ONE concise statement. Also capture one-off/dated specifics (the timestamp is set automatically). Skip pure pleasantries.\n\
+(9) DOCUMENTS AS SOURCES: the input is prefixed with an 'Available project documents' section that lists each document with its exact 'id' and title. If an extracted piece of knowledge is backed by / derived from / documented in one of these documents (e.g. a 'fact' whose source is a feature doc, or a 'decision' documented in F00x), cite the relevant document 'id(s)' in the op's 'quellen' array — using the EXACT id from the list, NEVER invented. 'quellen' are SOURCES (an orthogonal evidence layer), NOT links/edges; if nothing backs it, omit 'quellen' or leave it empty.\n\
+\n\
+OUTPUT FORMAT: Return EXCLUSIVELY a single JSON object, nothing else (no prose text, no code fences before/after), in exactly this form:\n\
 {\n\
   \"ops\": [\n\
-    { \"action\": \"add\", \"typ\": \"beobachtung|fakt|erkenntnis|entscheidung|recherche|vermutung\",\n\
-      \"inhalt\": \"…\", \"begruendung\": \"…\", \"tags\": [\"…\"], \"quellen\": [\"<exakte Dokument-id>\"],\n\
-      \"links\": [ { \"ziel\": \"<id|eindeutiger Titel-Substring>\", \"polaritaet\": \"stuetzt|widerspricht|ersetzt\", \"als\": \"parent|child\" } ] },\n\
-    { \"action\": \"update\", \"id\": \"…\", \"fields\": { \"inhalt\": \"…\", \"ueberholt\": true, \"quellen\": [\"<exakte Dokument-id>\"] } },\n\
-    { \"action\": \"link\", \"von\": \"<id|Titel>\", \"zu\": \"<id|Titel>\", \"polaritaet\": \"stuetzt|widerspricht|ersetzt\" },\n\
+    { \"action\": \"add\", \"typ\": \"observation|fact|insight|decision|research|hypothesis\",\n\
+      \"inhalt\": \"…\", \"begruendung\": \"…\", \"tags\": [\"…\"], \"quellen\": [\"<exact document id>\"],\n\
+      \"links\": [ { \"ziel\": \"<id|unique title substring>\", \"polaritaet\": \"supports|contradicts|replaces\", \"als\": \"parent|child\" } ] },\n\
+    { \"action\": \"update\", \"id\": \"…\", \"fields\": { \"inhalt\": \"…\", \"ueberholt\": true, \"quellen\": [\"<exact document id>\"] } },\n\
+    { \"action\": \"link\", \"von\": \"<id|title>\", \"zu\": \"<id|title>\", \"polaritaet\": \"supports|contradicts|replaces\" },\n\
     { \"action\": \"noop\" }\n\
   ],\n\
-  \"rolling_summary\": \"kompakte, aktualisierte Zusammenfassung des Session-Bogens\",\n\
+  \"rolling_summary\": \"compact, updated summary of the session arc (in the conversation's language)\",\n\
   \"hint\": \"\"\n\
 }\n\
-Das JSON DARF zusätzlich ein optionales Top-Level-Feld 'hint' enthalten: Wenn es wirkt, als bräuchte der Agent vorhandenes projektweites Wissen, das er nicht geholt hat, gib in 'hint' einen EINZEILIGEN Pointer (kein Befehl, keine Aufgabe — nur 'Zu X existiert Wissen'); sonst leer.\n\
-Gibt es nichts Dauerhaftes zu erfassen, gib eine leere 'ops'-Liste (oder eine einzelne noop) zurück und aktualisiere nur 'rolling_summary'.";
+The JSON MAY additionally contain an optional top-level 'hint' field: if it looks like the agent needs existing project-wide knowledge it has not fetched, put a SINGLE-LINE pointer in 'hint' (not a command, not a task — just 'knowledge about X exists'); otherwise leave it empty.\n\
+If there is nothing durable to capture, return an empty 'ops' list (or a single noop) and only update 'rolling_summary'.";
 
 #[cfg(test)]
 mod tests {
@@ -257,9 +262,9 @@ mod tests {
     fn parse_add_with_links() {
         let s = r#"{
           "ops": [
-            { "action": "add", "typ": "entscheidung", "inhalt": "Use WAL mode",
+            { "action": "add", "typ": "decision", "inhalt": "Use WAL mode",
               "begruendung": "for concurrency", "tags": ["db"],
-              "links": [ { "ziel": "SQLite chosen", "polaritaet": "stuetzt", "als": "parent" } ] }
+              "links": [ { "ziel": "SQLite chosen", "polaritaet": "supports", "als": "parent" } ] }
           ],
           "rolling_summary": "set up the DB"
         }"#;
@@ -275,13 +280,13 @@ mod tests {
                 links,
                 ..
             } => {
-                assert_eq!(typ, "entscheidung");
+                assert_eq!(typ, "decision");
                 assert_eq!(inhalt, "Use WAL mode");
                 assert_eq!(begruendung, "for concurrency");
                 assert_eq!(tags, &vec!["db".to_string()]);
                 assert_eq!(links.len(), 1);
                 assert_eq!(links[0].ziel, "SQLite chosen");
-                assert_eq!(links[0].polaritaet, "stuetzt");
+                assert_eq!(links[0].polaritaet, "supports");
                 assert_eq!(links[0].als, "parent");
             }
             other => panic!("expected Add, got {other:?}"),
@@ -292,14 +297,14 @@ mod tests {
     fn parse_add_link_defaults() {
         // links may omit polaritaet/als; tags/links may be absent entirely.
         let s = r#"{ "ops": [
-            { "action": "add", "typ": "fakt", "inhalt": "X", "begruendung": "user said",
+            { "action": "add", "typ": "fact", "inhalt": "X", "begruendung": "user said",
               "links": [ { "ziel": "node-1" } ] }
         ] }"#;
         let r = parse(s);
         match &r.ops[0] {
             Op::Add { links, tags, .. } => {
                 assert!(tags.is_empty());
-                assert_eq!(links[0].polaritaet, "stuetzt");
+                assert_eq!(links[0].polaritaet, "supports");
                 assert_eq!(links[0].als, "parent");
             }
             other => panic!("expected Add, got {other:?}"),
@@ -344,14 +349,14 @@ mod tests {
     #[test]
     fn parse_link() {
         let s = r#"{ "ops": [
-            { "action": "link", "von": "A", "zu": "B", "polaritaet": "widerspricht" }
+            { "action": "link", "von": "A", "zu": "B", "polaritaet": "contradicts" }
         ] }"#;
         let r = parse(s);
         match &r.ops[0] {
             Op::Link { von, zu, polaritaet } => {
                 assert_eq!(von, "A");
                 assert_eq!(zu, "B");
-                assert_eq!(polaritaet, "widerspricht");
+                assert_eq!(polaritaet, "contradicts");
             }
             other => panic!("expected Link, got {other:?}"),
         }
@@ -376,7 +381,7 @@ mod tests {
 
     #[test]
     fn parse_json_code_fence() {
-        let s = "```json\n{ \"ops\": [ { \"action\": \"add\", \"typ\": \"fakt\", \
+        let s = "```json\n{ \"ops\": [ { \"action\": \"add\", \"typ\": \"fact\", \
                  \"inhalt\": \"Z\", \"begruendung\": \"src\" } ], \"rolling_summary\": \"s\" }\n```";
         let r = parse(s);
         assert_eq!(r.ops.len(), 1);
@@ -416,7 +421,7 @@ mod tests {
         // First op is malformed (missing required `inhalt`/`begruendung`),
         // it is dropped; the valid noop survives.
         let s = r#"{ "ops": [
-            { "action": "add", "typ": "fakt" },
+            { "action": "add", "typ": "fact" },
             { "action": "noop" }
         ], "rolling_summary": "kept" }"#;
         let r = parse(s);
@@ -433,31 +438,42 @@ mod tests {
     }
 
     #[test]
-    fn extraction_prompt_is_german_and_specifies_json() {
-        assert!(EXTRACTION_PROMPT.contains("Du beobachtest"));
+    fn extraction_prompt_is_english_and_specifies_json() {
+        assert!(EXTRACTION_PROMPT.contains("You are observing"));
         assert!(EXTRACTION_PROMPT.contains("rolling_summary"));
         assert!(EXTRACTION_PROMPT.contains("\"action\": \"add\""));
+        // English schema codes appear in the JSON contract.
+        assert!(EXTRACTION_PROMPT.contains("observation|fact|insight|decision|research|hypothesis"));
+        assert!(EXTRACTION_PROMPT.contains("supports|contradicts|replaces"));
+    }
+
+    #[test]
+    fn extraction_prompt_carries_source_language_rule() {
+        // The CRITICAL rule: content language follows the conversation, NOT this prompt.
+        assert!(EXTRACTION_PROMPT.contains("SAME language as the conversation"));
+        assert!(EXTRACTION_PROMPT.contains("Do NOT translate the content to English"));
+        assert!(EXTRACTION_PROMPT.contains("must NOT change the language of what you record"));
     }
 
     #[test]
     fn extraction_prompt_mentions_optional_hint() {
         assert!(EXTRACTION_PROMPT.contains("'hint'"));
-        assert!(EXTRACTION_PROMPT.contains("EINZEILIGEN Pointer"));
+        assert!(EXTRACTION_PROMPT.contains("SINGLE-LINE pointer"));
     }
 
     #[test]
     fn parse_hint_when_present() {
         let s = r#"{ "ops": [], "rolling_summary": "s",
-            "hint": "Zu pathfinding existiert bereits Wissen" }"#;
+            "hint": "knowledge about pathfinding already exists" }"#;
         let r = parse(s);
-        assert_eq!(r.hint, "Zu pathfinding existiert bereits Wissen");
+        assert_eq!(r.hint, "knowledge about pathfinding already exists");
         assert_eq!(r.rolling_summary, "s");
     }
 
     #[test]
     fn parse_add_with_quellen() {
         let s = r#"{ "ops": [
-            { "action": "add", "typ": "fakt", "inhalt": "X", "begruendung": "doc'd in F004",
+            { "action": "add", "typ": "fact", "inhalt": "X", "begruendung": "doc'd in F004",
               "quellen": [".claude/features/F004-weapons.md", ".claude/adr/003.md"] }
         ] }"#;
         let r = parse(s);
@@ -478,7 +494,7 @@ mod tests {
     #[test]
     fn parse_add_quellen_absent_is_empty() {
         let s = r#"{ "ops": [
-            { "action": "add", "typ": "fakt", "inhalt": "X", "begruendung": "src" }
+            { "action": "add", "typ": "fact", "inhalt": "X", "begruendung": "src" }
         ] }"#;
         let r = parse(s);
         match &r.ops[0] {
@@ -507,9 +523,9 @@ mod tests {
 
     #[test]
     fn extraction_prompt_mentions_documents_and_quellen() {
-        assert!(EXTRACTION_PROMPT.contains("Verfügbare Projekt-Dokumente"));
+        assert!(EXTRACTION_PROMPT.contains("Available project documents"));
         assert!(EXTRACTION_PROMPT.contains("quellen"));
-        assert!(EXTRACTION_PROMPT.contains("NIEMALS erfunden"));
+        assert!(EXTRACTION_PROMPT.contains("NEVER invented"));
     }
 
     #[test]

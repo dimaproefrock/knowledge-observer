@@ -556,7 +556,7 @@ fn generate_hints(knowledge_dir: &Path, session_id: &str, llm_hint: &str) {
 
     // (b) LLM relevance nudge — append the trimmed pointer if present.
     if !llm_hint.is_empty() {
-        let line = format!("[Wissen] {llm_hint}");
+        let line = format!("[Knowledge] {llm_hint}");
         if let Err(e) = observer_hint::append(knowledge_dir, session_id, &line) {
             eprintln!("[daemon] append llm hint failed: {e}");
         }
@@ -1121,7 +1121,7 @@ mod tests {
             &token,
             "",
             "record",
-            json!({ "typ": "beobachtung", "inhalt": "daemon-routed node", "begruendung": "warum?" }),
+            json!({ "typ": "observation", "inhalt": "daemon-routed node", "begruendung": "why?" }),
             "",
         )
         .expect("record call");
@@ -1131,7 +1131,7 @@ mod tests {
         let cur = crate::ipc::call(port, &token, "", "current_state", json!({}), "")
             .expect("current_state call");
         assert!(cur.ok);
-        assert!(cur.data.get("aktive_entscheidungen").is_some());
+        assert!(cur.data.get("active_decisions").is_some());
 
         // And the store file actually exists under the resolved knowledge dir.
         let g = crate::store::knowledge_store::query(&knowledge_dir);

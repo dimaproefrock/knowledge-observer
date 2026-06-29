@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -24,12 +24,12 @@
     --radius-md: 8px;
 
     /* type colours (ported from KnowledgeNode.css border-left bands) */
-    --t-entscheidung: #a855f7;
-    --t-erkenntnis:   #3b82f6;
-    --t-fakt:         #14b8a6;
-    --t-beobachtung:  #22c55e;
-    --t-recherche:    #eab308;
-    --t-vermutung:    #f97316;
+    --t-decision:    #a855f7;
+    --t-insight:     #3b82f6;
+    --t-fact:        #14b8a6;
+    --t-observation: #22c55e;
+    --t-research:    #eab308;
+    --t-hypothesis:  #f97316;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -128,12 +128,12 @@
     cursor: pointer;
     transition: opacity .15s ease, box-shadow .15s ease, border-color .12s ease;
   }
-  .knode.typ-entscheidung { border-left-color: var(--t-entscheidung); }
-  .knode.typ-erkenntnis   { border-left-color: var(--t-erkenntnis); }
-  .knode.typ-fakt         { border-left-color: var(--t-fakt); }
-  .knode.typ-beobachtung  { border-left-color: var(--t-beobachtung); }
-  .knode.typ-recherche    { border-left-color: var(--t-recherche); }
-  .knode.typ-vermutung    { border-left-color: var(--t-vermutung); }
+  .knode.typ-decision    { border-left-color: var(--t-decision); }
+  .knode.typ-insight     { border-left-color: var(--t-insight); }
+  .knode.typ-fact        { border-left-color: var(--t-fact); }
+  .knode.typ-observation { border-left-color: var(--t-observation); }
+  .knode.typ-research    { border-left-color: var(--t-research); }
+  .knode.typ-hypothesis  { border-left-color: var(--t-hypothesis); }
 
   .knode.sel { border-color: var(--accent-primary); box-shadow: 0 0 0 2px rgba(88,166,255,.5); }
   .knode.dim { opacity: .22; }
@@ -173,13 +173,13 @@
   }
   .kn-time { font-size: 9px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .kn-status { font-size: 10px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: .03em; }
-  .status-gestützt   { color: #22c55e; }
-  .status-umstritten { color: #eab308; }
-  .status-widerlegt  { color: #ef4444; }
-  .status-aktiv      { color: #3b82f6; }
-  .status-erledigt   { color: #14b8a6; }
-  .status-überholt   { color: var(--text-tertiary); }
-  .status-unbelegt   { color: var(--text-tertiary); }
+  .status-supported   { color: #22c55e; }
+  .status-disputed    { color: #eab308; }
+  .status-refuted     { color: #ef4444; }
+  .status-active      { color: #3b82f6; }
+  .status-done        { color: #14b8a6; }
+  .status-superseded  { color: var(--text-tertiary); }
+  .status-unsupported { color: var(--text-tertiary); }
 
   /* ---- document card (cited source) ---- */
   .docnode {
@@ -252,10 +252,10 @@
   <h1>Knowledge&nbsp;Observer</h1>
   <span id="counts">…</span>
   <div class="ctrl">
-    <input type="search" id="search" placeholder="Suche in Inhalt / Begründung…" autocomplete="off">
+    <input type="search" id="search" placeholder="Search in content / rationale…" autocomplete="off">
   </div>
   <div class="ctrl">
-    <label>Typ</label>
+    <label>Type</label>
     <div class="toggles" id="typ-toggles"></div>
   </div>
   <div class="ctrl">
@@ -264,7 +264,7 @@
   </div>
   <div class="ctrl">
     <label>Tag</label>
-    <select id="tag-filter"><option value="">alle</option></select>
+    <select id="tag-filter"><option value="">all</option></select>
   </div>
   <div id="legend"></div>
 </header>
@@ -275,21 +275,21 @@
       <svg id="edges"></svg>
       <!-- axis labels, lane heads, cards appended here -->
     </div>
-    <div id="empty-graph" class="hidden">Noch kein Wissen erfasst.</div>
+    <div id="empty-graph" class="hidden">No knowledge recorded yet.</div>
     <div id="zoom-ctrl">
-      <button id="zoom-in" title="Hineinzoomen">+</button>
-      <button id="zoom-out" title="Herauszoomen">−</button>
-      <button id="zoom-fit" class="fit" title="Alles einpassen">Fit</button>
+      <button id="zoom-in" title="Zoom in">+</button>
+      <button id="zoom-out" title="Zoom out">−</button>
+      <button id="zoom-fit" class="fit" title="Fit all">Fit</button>
     </div>
     <div id="zoom-level">100%</div>
   </div>
   <aside id="side">
     <div class="panel" id="detail">
       <h3>Detail</h3>
-      <div class="empty">Knoten anklicken für Details.</div>
+      <div class="empty">Click a node for details.</div>
     </div>
     <div class="panel" id="questions">
-      <h3>Offene Fragen</h3>
+      <h3>Open questions</h3>
       <div class="empty">—</div>
     </div>
   </aside>
@@ -299,25 +299,25 @@
 "use strict";
 
 // ---- constants ----
-const TYPES = ["entscheidung", "erkenntnis", "fakt", "beobachtung", "recherche", "vermutung"];
+const TYPES = ["decision", "insight", "fact", "observation", "research", "hypothesis"];
 const TYPE_COLOR = {
-  entscheidung: "#a855f7", erkenntnis: "#3b82f6", fakt: "#14b8a6",
-  beobachtung: "#22c55e", recherche: "#eab308", vermutung: "#f97316",
+  decision: "#a855f7", insight: "#3b82f6", fact: "#14b8a6",
+  observation: "#22c55e", research: "#eab308", hypothesis: "#f97316",
 };
-const STATUSES = ["gestützt", "umstritten", "widerlegt", "unbelegt", "aktiv", "überholt", "erledigt"];
+const STATUSES = ["supported", "disputed", "refuted", "unsupported", "active", "superseded", "done"];
 
 // Edge stroke per polarity (ported from knowledgeLayout.ts edgeStroke).
 const POLARITY = {
-  stuetzt:      { color: "#22c55e", dash: "" },
-  widerspricht: { color: "#ef4444", dash: "" },
-  ersetzt:      { color: "#a855f7", dash: "6 3" },
+  supports:    { color: "#22c55e", dash: "" },
+  contradicts: { color: "#ef4444", dash: "" },
+  replaces:    { color: "#a855f7", dash: "6 3" },
 };
 const CITE = { color: "#9ca3af", dash: "5 4" };
 
 // ---- layout geometry (mirrors knowledgeLayout.ts) ----
 // y = chronological RANK (newest = row 0 at top), equal Y_GAP per item.
 // x = type lane; lane 6 = documents.
-const LANE = { entscheidung: 0, erkenntnis: 1, fakt: 2, beobachtung: 3, recherche: 4, vermutung: 5 };
+const LANE = { decision: 0, insight: 1, fact: 2, observation: 3, research: 4, hypothesis: 5 };
 const DOC_LANE = 6;
 const X_GAP = 280;
 const Y_GAP = 150;
@@ -350,7 +350,13 @@ function esc(s) {
   return String(s == null ? "" : s)
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
-function statusClass(st) { return "status-" + (st || "unbelegt"); }
+function statusClass(st) { return "status-" + (st || "unsupported"); }
+// Nice display label for a raw English code (typ/status/polarity): capitalized.
+function label(code) {
+  if (!code) return "";
+  const s = String(code);
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 // "DD.MM. HH:MM" local time (mirrors axisLabel / knowledge-time).
 function fmtTime(datum) {
   const t = Date.parse(datum);
@@ -388,8 +394,8 @@ function rebuildTagFilter() {
   const cur = sel.value;
   const tags = new Set();
   for (const n of GRAPH.nodes) for (const t of (n.tags || [])) tags.add(t);
-  const sorted = [...tags].sort((a, b) => a.localeCompare(b, "de"));
-  sel.innerHTML = '<option value="">alle</option>' +
+  const sorted = [...tags].sort((a, b) => a.localeCompare(b, "en"));
+  sel.innerHTML = '<option value="">all</option>' +
     sorted.map(t => `<option>${esc(t)}</option>`).join("");
   if (sorted.includes(cur)) sel.value = cur; else filters.tag = "";
 }
@@ -460,7 +466,7 @@ function render() {
 
   if (!GRAPH.nodes.length) {
     emptyEl.classList.remove("hidden");
-    document.getElementById("counts").textContent = "0 Knoten, 0 Kanten";
+    document.getElementById("counts").textContent = "0 nodes, 0 edges";
     drawEdges();
     renderQuestions();
     return;
@@ -491,7 +497,7 @@ function render() {
     head.style.left = (LEFT_PAD + LANE[typ] * X_GAP) + "px";
     head.style.top = "6px";
     head.style.width = KNODE_W + "px";
-    head.innerHTML = `<span>${esc(typ)}</span><span class="n">${count}</span>`;
+    head.innerHTML = `<span>${esc(label(typ))}</span><span class="n">${count}</span>`;
     world.appendChild(head);
   }
   if (cited.length) {
@@ -501,7 +507,7 @@ function render() {
     head.style.left = (LEFT_PAD + DOC_LANE * X_GAP) + "px";
     head.style.top = "6px";
     head.style.width = DOC_W + "px";
-    head.innerHTML = `<span>dokumente</span><span class="n">${cited.length}</span>`;
+    head.innerHTML = `<span>documents</span><span class="n">${cited.length}</span>`;
     world.appendChild(head);
   }
 
@@ -518,8 +524,8 @@ function render() {
 
   computeWorldBox();
   document.getElementById("counts").textContent =
-    `${GRAPH.nodes.length} Knoten, ${GRAPH.edges.length} Kanten` +
-    (cited.length ? `, ${cited.length} Dok.` : "");
+    `${GRAPH.nodes.length} nodes, ${GRAPH.edges.length} edges` +
+    (cited.length ? `, ${cited.length} docs` : "");
 
   drawEdges();
   applyTransform();
@@ -550,17 +556,17 @@ function makeCard(n, matched, anyFilter, importance) {
   const tags = (n.tags || []).slice(0, 4).map(t => `<span class="kt-tag">${esc(t)}</span>`).join("");
   const origin = n.herkunft === "observer" ? `<span class="kn-origin" title="observer">●</span>` : "";
   const begr = n.begruendung
-    ? `<div class="kn-begr"><span class="kb-label">warum </span>${esc(n.begruendung)}</div>` : "";
+    ? `<div class="kn-begr"><span class="kb-label">why </span>${esc(n.begruendung)}</div>` : "";
   const wert = n.wert ? `<div class="kn-wert">${esc(n.wert)}</div>` : "";
 
   el.innerHTML =
-    `<div class="kn-head"><span class="kn-typ">${esc(n.typ)}</span>${origin}` +
+    `<div class="kn-head"><span class="kn-typ">${esc(label(n.typ))}</span>${origin}` +
       `<span class="kn-score">${score}</span></div>` +
     `<div class="kn-inhalt">${esc(n.inhalt)}</div>` +
     begr + wert +
     (tags ? `<div class="kn-tags">${tags}</div>` : "") +
     `<div class="kn-foot"><span class="kn-time">${esc(fmtTime(n.datum))}</span>` +
-      `<span class="kn-status ${statusClass(n.status)}">${esc(n.status || "—")}</span></div>`;
+      `<span class="kn-status ${statusClass(n.status)}">${esc(label(n.status) || "—")}</span></div>`;
 
   el.addEventListener("click", (ev) => { ev.stopPropagation(); selectNode(n.id); });
   cardEls.set(n.id, el);
@@ -595,26 +601,26 @@ function selectNode(id) {
 
 function renderDetail(n) {
   const box = document.getElementById("detail");
-  if (!n) { box.innerHTML = '<h3>Detail</h3><div class="empty">Knoten anklicken für Details.</div>'; return; }
+  if (!n) { box.innerHTML = '<h3>Detail</h3><div class="empty">Click a node for details.</div>'; return; }
   const row = (label, val) =>
     (val === undefined || val === null || val === "" ||
       (Array.isArray(val) && !val.length)) ? "" :
       `<dt>${esc(label)}</dt><dd>${Array.isArray(val) ? val.map(esc).join(", ") : esc(val)}</dd>`;
 
   let html = '<h3>Detail</h3><dl>';
-  html += `<dt>Typ</dt><dd><span class="badge" style="background:${TYPE_COLOR[n.typ] || "#888"}">${esc(n.typ)}</span>` +
-          ` <span class="kn-status ${statusClass(n.status)}">${esc(n.status || "—")}</span></dd>`;
-  html += `<dt>Inhalt</dt><dd class="big">${esc(n.inhalt)}</dd>`;
-  html += row("Begründung", n.begruendung);
-  html += row("Datum", n.datum);
+  html += `<dt>Type</dt><dd><span class="badge" style="background:${TYPE_COLOR[n.typ] || "#888"}">${esc(label(n.typ))}</span>` +
+          ` <span class="kn-status ${statusClass(n.status)}">${esc(label(n.status) || "—")}</span></dd>`;
+  html += `<dt>Content</dt><dd class="big">${esc(n.inhalt)}</dd>`;
+  html += row("Rationale", n.begruendung);
+  html += row("Date", n.datum);
   html += row("Score", (typeof n.score === "number" ? n.score.toFixed(3) : n.score));
-  html += row("Basis-Score", (typeof n.basis_score === "number" ? n.basis_score.toFixed(3) : n.basis_score));
-  html += row("Herkunft", n.herkunft);
+  html += row("Base score", (typeof n.basis_score === "number" ? n.basis_score.toFixed(3) : n.basis_score));
+  html += row("Origin", n.herkunft);
   html += row("Tags", n.tags);
-  html += row("Quelle-IDs", n.quelle_ids);
-  html += row("Frage-ID", n.frage_id);
-  html += row("Wert", n.wert);
-  html += row("Session-ID", n.session_id);
+  html += row("Source IDs", n.quelle_ids);
+  html += row("Question ID", n.frage_id);
+  html += row("Value", n.wert);
+  html += row("Session ID", n.session_id);
   html += row("ID", n.id);
   html += '</dl>';
   box.innerHTML = html;
@@ -624,14 +630,14 @@ function renderQuestions() {
   const box = document.getElementById("questions");
   const fragen = GRAPH.fragen || [];
   if (!fragen.length) {
-    box.innerHTML = '<h3>Offene Fragen</h3><div class="empty">—</div>';
+    box.innerHTML = '<h3>Open questions</h3><div class="empty">—</div>';
     return;
   }
-  let html = '<h3>Offene Fragen (' + fragen.length + ')</h3>';
+  let html = '<h3>Open questions (' + fragen.length + ')</h3>';
   for (const f of fragen) {
     const mass = {};
     for (const n of GRAPH.nodes) {
-      if (n.typ === "fakt" && n.frage_id === f.id && n.wert) {
+      if (n.typ === "fact" && n.frage_id === f.id && n.wert) {
         mass[n.wert] = (mass[n.wert] || 0) + (typeof n.basis_score === "number" ? n.basis_score : 0);
       }
     }
@@ -695,7 +701,7 @@ function drawEdges() {
   for (const e of GRAPH.edges) {
     const a = center.get(e.von), b = center.get(e.zu);
     if (!a || !b) continue;
-    const pol = POLARITY[e.polaritaet] || POLARITY.stuetzt;
+    const pol = POLARITY[e.polaritaet] || POLARITY.supports;
     const sel = selectedId && (e.von === selectedId || e.zu === selectedId);
     line(a, b, pol.color, pol.dash, sel, true);
   }
@@ -819,7 +825,7 @@ function buildToggles() {
     const b = document.createElement("span");
     b.className = "toggle on";
     b.style.color = TYPE_COLOR[typ];
-    b.innerHTML = `<span class="dot" style="background:${TYPE_COLOR[typ]}"></span>${typ}`;
+    b.innerHTML = `<span class="dot" style="background:${TYPE_COLOR[typ]}"></span>${label(typ)}`;
     b.addEventListener("click", () => {
       if (filters.typ.has(typ)) filters.typ.delete(typ); else filters.typ.add(typ);
       b.classList.toggle("on", filters.typ.has(typ));
@@ -831,7 +837,7 @@ function buildToggles() {
   for (const s of STATUSES) {
     const b = document.createElement("span");
     b.className = "toggle";
-    b.textContent = s;
+    b.textContent = label(s);
     b.addEventListener("click", () => {
       if (filters.status.has(s)) filters.status.delete(s); else filters.status.add(s);
       b.classList.toggle("on", filters.status.has(s));
@@ -844,12 +850,12 @@ function buildToggles() {
 function buildLegend() {
   const lg = document.getElementById("legend");
   const types = TYPES.map(t =>
-    `<span class="lg"><span class="sw" style="background:${TYPE_COLOR[t]}"></span>${t}</span>`).join("");
+    `<span class="lg"><span class="sw" style="background:${TYPE_COLOR[t]}"></span>${label(t)}</span>`).join("");
   const pols =
-    `<span class="lg"><span class="ln" style="border-color:#22c55e"></span>stützt</span>` +
-    `<span class="lg"><span class="ln" style="border-color:#ef4444"></span>widerspricht</span>` +
-    `<span class="lg"><span class="ln" style="border-color:#a855f7;border-top-style:dashed"></span>ersetzt</span>` +
-    `<span class="lg"><span class="ln" style="border-color:#9ca3af;border-top-style:dashed"></span>zitiert</span>`;
+    `<span class="lg"><span class="ln" style="border-color:#22c55e"></span>supports</span>` +
+    `<span class="lg"><span class="ln" style="border-color:#ef4444"></span>contradicts</span>` +
+    `<span class="lg"><span class="ln" style="border-color:#a855f7;border-top-style:dashed"></span>replaces</span>` +
+    `<span class="lg"><span class="ln" style="border-color:#9ca3af;border-top-style:dashed"></span>cites</span>`;
   lg.innerHTML = types + pols;
 }
 

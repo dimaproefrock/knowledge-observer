@@ -33,10 +33,10 @@ pub const OBS_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Section labels used to keep the assembled stdin text legible to the observer LLM and to the
 /// unit tests that assert on structure.
-const SEC_PROMPT: &str = "=== AUFGABE ===";
-const SEC_DAG: &str = "=== BESTEHENDER DAG (Ausschnitt) ===";
-const SEC_DELTA: &str = "=== NEUE TURNS (Delta) ===";
-const SEC_SUMMARY: &str = "=== BISHERIGER SESSION-BOGEN (Zusammenfassung) ===";
+const SEC_PROMPT: &str = "=== TASK ===";
+const SEC_DAG: &str = "=== EXISTING GRAPH (excerpt) ===";
+const SEC_DELTA: &str = "=== NEW TURNS (delta) ===";
+const SEC_SUMMARY: &str = "=== SESSION SO FAR (summary) ===";
 
 /// Run one extraction turn for a session's persistent observer agent.
 ///
@@ -118,7 +118,7 @@ mod tests {
         let prompt = contract::EXTRACTION_PROMPT;
         let input = build_create_input(prompt, "USER: hi\nAGENT: hello", "node-1: SQLite chosen");
         // Full prompt leads.
-        assert!(input.contains("Du beobachtest"));
+        assert!(input.contains("You are observing"));
         assert!(input.contains(prompt));
         // Delta + excerpt present.
         assert!(input.contains("USER: hi"));
@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn resume_input_omits_full_prompt_but_keeps_delta_and_excerpt() {
         let input = build_resume_input("USER: next\nAGENT: ok", "node-2: WAL mode");
-        assert!(!input.contains("Du beobachtest"));
+        assert!(!input.contains("You are observing"));
         assert!(!input.contains(SEC_PROMPT));
         assert!(input.contains("USER: next"));
         assert!(input.contains("node-2: WAL mode"));
@@ -143,10 +143,10 @@ mod tests {
     #[test]
     fn reseed_input_carries_summary_and_prompt() {
         let prompt = contract::EXTRACTION_PROMPT;
-        let input = build_reseed_input(prompt, "Bisher: DB + Terminal eingerichtet.", "node-3: x");
+        let input = build_reseed_input(prompt, "So far: DB + terminal set up.", "node-3: x");
         assert!(input.contains(prompt));
-        assert!(input.contains("Du beobachtest"));
-        assert!(input.contains("Bisher: DB + Terminal eingerichtet."));
+        assert!(input.contains("You are observing"));
+        assert!(input.contains("So far: DB + terminal set up."));
         assert!(input.contains("node-3: x"));
         assert!(input.contains(SEC_SUMMARY));
         assert!(input.contains(SEC_PROMPT));

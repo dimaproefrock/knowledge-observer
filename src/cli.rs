@@ -90,23 +90,24 @@ fn envelope(event: &str, text: &str) -> String {
 
 // ===================== index (SessionStart) =====================
 
-/// Build the compact German knowledge index text from a graph. `None` when there is
+/// Build the compact knowledge index text from a graph (in English; the recorded
+/// node content stays in whatever language it was recorded). `None` when there is
 /// nothing worth injecting (no active decisions AND no open questions). `max_decisions`
 /// / `max_questions` cap the listed items (from `Config`).
 ///
 /// Replicates the `current_state` projection in `dispatch`: active decisions
-/// (`Entscheidung` with status `aktiv`) and open questions (a `frage` whose leading
-/// value's node is NOT `gestützt`).
+/// (`Decision` with status `active`) and open questions (a `frage` whose leading
+/// value's node is NOT `supported`).
 fn build_index_text(g: &KnowledgeGraph, max_decisions: usize, max_questions: usize) -> Option<String> {
     let decisions: Vec<&str> = g
         .nodes
         .iter()
-        .filter(|n| matches!(n.typ, NodeType::Entscheidung) && n.status == "aktiv")
+        .filter(|n| matches!(n.typ, NodeType::Decision) && n.status == "active")
         .map(|n| n.inhalt.as_str())
         .take(max_decisions)
         .collect();
 
-    // A question is "answered" once one value clearly leads (its fakt is gestützt);
+    // A question is "answered" once one value clearly leads (its fact is supported);
     // only genuinely contested/empty ones count as open.
     let mut open: Vec<(String, Option<String>)> = Vec::new();
     for fr in &g.fragen {
@@ -120,7 +121,7 @@ fn build_index_text(g: &KnowledgeGraph, max_decisions: usize, max_questions: usi
                 }
             }
         }
-        let answered = matches!(best, Some((_, _, st)) if st == "gestützt");
+        let answered = matches!(best, Some((_, _, st)) if st == "supported");
         if !answered {
             open.push((fr.inhalt.clone(), best.map(|(w, _, _)| w.to_string())));
         }
@@ -133,9 +134,9 @@ fn build_index_text(g: &KnowledgeGraph, max_decisions: usize, max_questions: usi
         return None;
     }
 
-    let mut out = String::from("Projektweites Wissen (aktueller Stand):\n");
+    let mut out = String::from("Project knowledge (current state):\n");
     if !decisions.is_empty() {
-        out.push_str("Aktive Entscheidungen:\n");
+        out.push_str("Active decisions:\n");
         for d in &decisions {
             out.push_str("- ");
             out.push_str(d);
@@ -143,11 +144,11 @@ fn build_index_text(g: &KnowledgeGraph, max_decisions: usize, max_questions: usi
         }
     }
     if !open.is_empty() {
-        out.push_str("Offene Fragen:\n");
+        out.push_str("Open questions:\n");
         for (frage, wert) in &open {
             out.push_str("- ");
             out.push_str(frage);
-            out.push_str(" (führend: ");
+            out.push_str(" (leading: ");
             out.push_str(wert.as_deref().unwrap_or("–"));
             out.push_str(")\n");
         }
@@ -240,7 +241,7 @@ mod tests {
         let dir = fresh_kdir("idx-some");
         knowledge_store::add_node(
             &dir,
-            NodeType::Entscheidung,
+            NodeType::Decision,
             "Wir nutzen Tauri 2".into(),
             "damit wir eine Desktop-App haben",
             None,
@@ -248,7 +249,7 @@ mod tests {
         )
         .unwrap();
         // Two competing values on the same question → contested, no value is clearly
-        // `gestützt` → the question stays "open".
+        // `supported` → the question stays "open".
         knowledge_store::add_fact(
             &dir,
             "Welche DB?",
@@ -278,9 +279,9 @@ mod tests {
         );
         let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(ctx.contains("Wir nutzen Tauri 2"), "decision text missing: {ctx}");
-        assert!(ctx.contains("Aktive Entscheidungen:"), "header missing: {ctx}");
+        assert!(ctx.contains("Active decisions:"), "header missing: {ctx}");
         assert!(ctx.contains("Welche DB?"), "open question missing: {ctx}");
-        assert!(ctx.contains("führend: SQLite"), "leading value missing: {ctx}");
+        assert!(ctx.contains("leading: SQLite"), "leading value missing: {ctx}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -290,7 +291,7 @@ mod tests {
         let dir = fresh_kdir("idx-off");
         knowledge_store::add_node(
             &dir,
-            NodeType::Entscheidung,
+            NodeType::Decision,
             "Egal".into(),
             "damit",
             None,
@@ -373,8 +374,8 @@ mod tests {
         for i in 0..5 {
             knowledge_store::add_node(
                 &dir,
-                NodeType::Entscheidung,
-                format!("Entscheidung {i}"),
+                NodeType::Decision,
+                format!("Decision {i}"),
                 "damit",
                 None,
                 "session",
@@ -386,7 +387,7 @@ mod tests {
         let s = build_index_envelope(&dir, &cfg).expect("expected Some");
         let v: Value = serde_json::from_str(&s).unwrap();
         let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-        let count = ctx.matches("- Entscheidung").count();
+        let count = ctx.matches("- Decision").count();
         assert_eq!(count, 2, "decision cap should limit to 2, ctx: {ctx}");
         let _ = std::fs::remove_dir_all(&dir);
     }

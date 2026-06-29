@@ -62,14 +62,14 @@ pub fn dispatch_store(req: &IpcRequest) -> (IpcResponse, bool) {
                 hints.insert(
                     0,
                     format!(
-                        "Gefiltert: {} von {} Knoten. Filter: q/typ/status/tags/limit.",
+                        "Filtered: {} of {} nodes. Filters: q/typ/status/tags/limit.",
                         view.nodes.len(),
                         full.nodes.len()
                     ),
                 );
             }
             hints.push(
-                "Kompakter Überblick (id+typ+titel). Volldetails (begruendung/quellen/inhalt) je Knoten via get_knowledge(ids:[...])."
+                "Compact overview (id+typ+titel). Full detail (begruendung/quellen/inhalt) per node via get_knowledge(ids:[...])."
                     .to_string(),
             );
             let mut v = compact_graph(&view);
@@ -98,7 +98,7 @@ pub fn dispatch_store(req: &IpcRequest) -> (IpcResponse, bool) {
             let Some(typ) = p.get("typ").and_then(Value::as_str).and_then(NodeType::parse) else {
                 return (
                     IpcResponse::err(
-                        "record: missing/invalid 'typ' (entscheidung|erkenntnis|fakt|beobachtung|recherche|vermutung)",
+                        "record: missing/invalid 'typ' (decision|insight|fact|observation|research|hypothesis)",
                     ),
                     false,
                 );
@@ -109,7 +109,7 @@ pub fn dispatch_store(req: &IpcRequest) -> (IpcResponse, bool) {
             let Some(begruendung) = nonempty(p, "begruendung") else {
                 return (
                     IpcResponse::err(
-                        "record: missing 'begruendung' — give the WHY: the question it answers (beobachtung/recherche/vermutung), the rationale (erkenntnis), the purpose 'damit/wozu' (entscheidung), or the source/where-from (fakt)",
+                        "record: missing 'begruendung' — give the WHY: the question it answers (observation/research/hypothesis), the rationale (insight), the purpose 'what for' (decision), or the source/where-from (fact)",
                     ),
                     false,
                 );
@@ -266,11 +266,11 @@ pub fn dispatch_store(req: &IpcRequest) -> (IpcResponse, bool) {
             let decisions: Vec<Value> = g
                 .nodes
                 .iter()
-                .filter(|n| matches!(n.typ, NodeType::Entscheidung) && n.status == "aktiv")
+                .filter(|n| matches!(n.typ, NodeType::Decision) && n.status == "active")
                 .map(|n| json!({ "id": n.id, "inhalt": n.inhalt, "tags": n.tags }))
                 .collect();
-            // A question is "answered" once one value clearly leads (its fakt is
-            // gestützt) — only genuinely contested/empty ones count as open.
+            // A question is "answered" once one value clearly leads (its fact is
+            // supported) — only genuinely contested/empty ones count as open.
             let mut offen: Vec<Value> = Vec::new();
             let mut beantwortet: Vec<Value> = Vec::new();
             for fr in &g.fragen {
@@ -284,10 +284,10 @@ pub fn dispatch_store(req: &IpcRequest) -> (IpcResponse, bool) {
                         }
                     }
                 }
-                let answered = matches!(best, Some((_, _, st)) if st == "gestützt");
+                let answered = matches!(best, Some((_, _, st)) if st == "supported");
                 let entry = json!({
                     "id": fr.id, "frage": fr.inhalt, "werte": fr.werte,
-                    "fuehrend": best.map(|(w, _, _)| w),
+                    "leading": best.map(|(w, _, _)| w),
                 });
                 if answered {
                     beantwortet.push(entry);
@@ -297,8 +297,8 @@ pub fn dispatch_store(req: &IpcRequest) -> (IpcResponse, bool) {
             }
             (
                 IpcResponse::ok(json!({
-                    "aktive_entscheidungen": decisions,
-                    "offene_fragen": offen,
+                    "active_decisions": decisions,
+                    "open_questions": offen,
                     "beantwortete_fragen": beantwortet,
                 })),
                 false,
@@ -377,7 +377,7 @@ fn apply_inline_links(kdir: &std::path::Path, new_id: &str, p: &Value) -> Vec<St
             msgs.push("link skipped: missing 'ziel'".to_string());
             continue;
         }
-        let pol = l.get("polaritaet").and_then(Value::as_str).unwrap_or("stuetzt");
+        let pol = l.get("polaritaet").and_then(Value::as_str).unwrap_or("supports");
         let als = l.get("als").and_then(Value::as_str).unwrap_or("parent");
         match ks::resolve_ref(&graph, ziel) {
             Ok(zid) => {
@@ -481,7 +481,7 @@ mod tests {
     fn record_rejects_missing_begruendung() {
         let dir = tmp();
         let (resp, changed) =
-            dispatch_store(&req(&dir, "record", json!({ "typ": "beobachtung", "inhalt": "x" })));
+            dispatch_store(&req(&dir, "record", json!({ "typ": "observation", "inhalt": "x" })));
         assert!(!resp.ok && !changed);
         assert!(resp.error.unwrap().contains("begruendung"));
         std::fs::remove_dir_all(&dir).ok();
@@ -493,7 +493,7 @@ mod tests {
         let (resp, changed) = dispatch_store(&req(
             &dir,
             "record",
-            json!({ "typ": "beobachtung", "inhalt": "x", "begruendung": "welche Frage?" }),
+            json!({ "typ": "observation", "inhalt": "x", "begruendung": "welche Frage?" }),
         ));
         assert!(resp.ok && changed);
         let g = ks::query(&kdir(&dir));
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn record_stamps_origin_session() {
         let dir = tmp();
-        let mut r = req(&dir, "record", json!({ "typ": "beobachtung", "inhalt": "x", "begruendung": "warum?" }));
+        let mut r = req(&dir, "record", json!({ "typ": "observation", "inhalt": "x", "begruendung": "warum?" }));
         r.session_id = "sess-42".into();
         let (resp, changed) = dispatch_store(&r);
         assert!(resp.ok && changed);
