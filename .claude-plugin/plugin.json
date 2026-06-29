@@ -9,7 +9,7 @@
   "keywords": ["knowledge", "observer", "memory", "graph", "context"],
   "defaultEnabled": true,
   "mcpServers": {
-    "knowledge-observer": { "command": "bash", "args": ["${CLAUDE_PLUGIN_ROOT}/bin/observer", "mcp-serve"] }
+    "knowledge-observer": { "command": "${CLAUDE_PLUGIN_DATA}/observer.exe", "args": ["mcp-serve"] }
   },
   "userConfig": {
     "knowledge_dir": {

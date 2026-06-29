@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # knowledge-observer launcher.
 #
-# Resolves the correct `observer` binary for this OS/arch and execs it, so a SINGLE
-# command string in the plugin's hooks and MCP config works on every platform even
-# though the native binary differs per OS. Resolution order:
+# Used by the plugin HOOKS, which Claude Code runs through its own shell — so a POSIX
+# script works there. It resolves the correct per-OS `observer` binary and execs it.
+#
+# It ALSO maintains a stable, directly-spawnable copy at $CLAUDE_PLUGIN_DATA/observer.exe
+# for the MCP server: Claude spawns the MCP command DIRECTLY (not via a shell), so it must
+# be a real executable — a no-extension shell script is not spawnable on Windows, and a
+# bare `bash` resolves to WSL there. The `.exe` suffix is required on Windows and harmless
+# on Unix (the suffix is ignored), so one fixed mcpServers command works on every OS.
+#
+# Binary resolution order:
 #   1. $OBSERVER_BIN            (explicit override; dev / CI)
 #   2. a binary next to this launcher (locally built: observer.exe / observer-native)
-#   3. the per-OS GitHub Release asset, cached in $CLAUDE_PLUGIN_DATA (downloaded once)
-#
-# Invoked via `bash` from mcpServers (robust on Windows, where a no-extension script
-# would not be directly spawnable) and via the shell from hooks.
+#   3. the per-OS GitHub Release asset, downloaded once per version into $CLAUDE_PLUGIN_DATA
 set -e
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-
-# 1) explicit override
-if [ -n "${OBSERVER_BIN:-}" ] && [ -x "${OBSERVER_BIN}" ]; then
-  exec "${OBSERVER_BIN}" "$@"
-fi
+data="${CLAUDE_PLUGIN_DATA:-${HOME}/.knowledge-observer}"
 
 # detect platform → release-asset name + local-dev binary name
 os="$(uname -s)"; arch="$(uname -m)"
@@ -33,30 +33,54 @@ case "${os}" in
     echo "knowledge-observer: unsupported OS '${os}'" >&2; exit 1 ;;
 esac
 
-# 2) locally-built binary sitting next to this launcher (manual / --plugin-dir dev)
-if [ -x "${here}/${localname}" ]; then
-  exec "${here}/${localname}" "$@"
+# --- resolve the binary to run into $bin ---
+if [ -n "${OBSERVER_BIN:-}" ] && [ -x "${OBSERVER_BIN}" ]; then
+  bin="${OBSERVER_BIN}"
+elif [ -x "${here}/${localname}" ]; then
+  bin="${here}/${localname}"
+else
+  # per-OS release binary, downloaded once per version. Several launches can fire at
+  # session start (SessionStart hook, MCP server, viewer) — a mkdir-lock elects ONE
+  # downloader; the others wait for the finished binary instead of racing.
+  ver="$(cat "${here}/../VERSION" 2>/dev/null | tr -d ' \t\r\n')"
+  cached="${data}/observer-${ver}-${asset}"
+  if [ ! -x "${cached}" ]; then
+    [ -n "${ver}" ] || { echo "knowledge-observer: no VERSION file and no local binary found" >&2; exit 1; }
+    mkdir -p "${data}"
+    lock="${data}/.dl-${ver}.lock"
+    if mkdir "${lock}" 2>/dev/null; then
+      tmp="${cached}.part.$$"
+      url="https://github.com/dimaproefrock/knowledge-observer/releases/download/${ver}/${asset}"
+      echo "knowledge-observer: fetching ${asset} (${ver})…" >&2
+      if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "${url}" -o "${tmp}"
+      elif command -v wget >/dev/null 2>&1; then
+        wget -qO "${tmp}" "${url}"
+      else
+        rmdir "${lock}" 2>/dev/null || true
+        echo "knowledge-observer: need curl or wget to fetch the binary" >&2; exit 1
+      fi
+      chmod +x "${tmp}" 2>/dev/null || true
+      mv "${tmp}" "${cached}"
+      rmdir "${lock}" 2>/dev/null || true
+    else
+      n=0
+      while [ ! -x "${cached}" ] && [ "${n}" -lt 60 ]; do sleep 0.5; n=$((n + 1)); done
+      [ -x "${cached}" ] || { echo "knowledge-observer: timed out waiting for the binary download" >&2; exit 1; }
+    fi
+  fi
+  bin="${cached}"
 fi
 
-# 3) per-OS release binary, cached in the plugin data dir (download once per version)
-ver="$(cat "${here}/../VERSION" 2>/dev/null | tr -d ' \t\r\n')"
-data="${CLAUDE_PLUGIN_DATA:-${HOME}/.knowledge-observer}"
-cached="${data}/observer-${ver}-${asset}"
-if [ ! -x "${cached}" ]; then
-  if [ -z "${ver}" ]; then
-    echo "knowledge-observer: no VERSION file and no local binary found" >&2; exit 1
+# --- keep a stable, directly-spawnable copy for the MCP server (mcpServers points at
+#     $CLAUDE_PLUGIN_DATA/observer.exe). Refresh it whenever the resolved binary is newer. ---
+stable="${data}/observer.exe"
+if [ "${bin}" != "${stable}" ] && { [ ! -e "${stable}" ] || [ "${bin}" -nt "${stable}" ]; }; then
+  mkdir -p "${data}" 2>/dev/null || true
+  if cp -f "${bin}" "${stable}.tmp.$$" 2>/dev/null; then
+    chmod +x "${stable}.tmp.$$" 2>/dev/null || true
+    mv -f "${stable}.tmp.$$" "${stable}" 2>/dev/null || true
   fi
-  mkdir -p "${data}"
-  url="https://github.com/dimaproefrock/knowledge-observer/releases/download/${ver}/${asset}"
-  echo "knowledge-observer: fetching ${asset} (${ver})…" >&2
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "${url}" -o "${cached}.tmp"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -qO "${cached}.tmp" "${url}"
-  else
-    echo "knowledge-observer: need curl or wget to fetch the binary" >&2; exit 1
-  fi
-  chmod +x "${cached}.tmp"
-  mv "${cached}.tmp" "${cached}"
 fi
-exec "${cached}" "$@"
+
+exec "${bin}" "$@"
