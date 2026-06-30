@@ -111,7 +111,10 @@ pub(crate) fn run_resumable_turn(
 ) -> Result<String, String> {
     let flag = if resume { "--resume" } else { "--session-id" };
     let args = [flag, session_id, "--setting-sources", "user"];
-    let mut cmd = base_claude_command(working_directory, &args, &[]);
+    // Mark this `claude` as the observer's own agent. If the plugin is installed at user
+    // scope its hooks load even here; this env var (inherited by those hook subprocesses)
+    // makes them bail in main(), preventing an unbounded self-observation loop.
+    let mut cmd = base_claude_command(working_directory, &args, &[("KNOWLEDGE_OBSERVER_INTERNAL", "1")]);
     let child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
     pump_and_collect(child, prompt, timeout)
 }
