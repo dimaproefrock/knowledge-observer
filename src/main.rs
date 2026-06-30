@@ -31,7 +31,10 @@ fn main() {
         Some("observer-trigger") => observer::daemon::run_trigger_subcommand(),
         Some("observer-daemon") | Some("daemon") => observer::daemon::serve(),
         Some("mcp-serve") => crate::mcp::run_mcp_serve(),
-        Some("view") => crate::view::run_view(),
+        Some("view") => crate::view::run_view(std::env::args().nth(2)),
+        // Hidden: the detached background server spawned by `view`. Not advertised in
+        // the usage string. Arg is the resolved absolute project dir.
+        Some("__view-serve") => crate::view::run_view_serve(std::env::args().nth(2)),
         other => {
             eprintln!(
                 "observer {}: unknown/missing subcommand {:?}\n\
