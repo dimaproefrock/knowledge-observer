@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "knowledge-observer"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "serde",
