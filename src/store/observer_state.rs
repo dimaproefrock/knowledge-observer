@@ -33,6 +33,11 @@ pub struct ObserverState {
     /// re-seed threshold (`should_reseed`). `serde(default)` → old files start at 0.
     #[serde(default)]
     pub turn_count: u32,
+    /// Unix seconds of the last observer-agent run for this session. Drives the
+    /// min-interval throttle in `run_trigger_pass`. `serde(default)` keeps older
+    /// state files (without this field) loadable as 0 (→ never throttled first run).
+    #[serde(default)]
+    pub last_run_at: u64,
 }
 
 fn state_dir(knowledge_dir: &Path) -> PathBuf {
@@ -83,6 +88,7 @@ mod tests {
             rolling_summary: "User refactored the pty manager.".to_string(),
             observer_sid: "obs-sid-42".to_string(),
             turn_count: 7,
+            last_run_at: 1_700_000_123,
         };
 
         save(&dir, "session-1", &state).unwrap();
@@ -91,6 +97,7 @@ mod tests {
         assert_eq!(loaded, state);
         assert_eq!(loaded.observer_sid, "obs-sid-42");
         assert_eq!(loaded.turn_count, 7);
+        assert_eq!(loaded.last_run_at, 1_700_000_123);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -113,6 +120,7 @@ mod tests {
         // New fields default cleanly.
         assert_eq!(loaded.observer_sid, "");
         assert_eq!(loaded.turn_count, 0);
+        assert_eq!(loaded.last_run_at, 0);
 
         std::fs::remove_dir_all(&dir).ok();
     }

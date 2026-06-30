@@ -25,6 +25,9 @@ pub struct Config {
     pub knowledge_dir: String,
     pub model: Option<String>,
     pub idle_daemon_secs: u64,
+    /// Minimum seconds between observer-agent runs for one session. Rapid Stop-hook
+    /// triggers within this window are coalesced into the next pass after the cooldown.
+    pub min_interval_secs: u64,
     pub obs_max_turns: u32,
     pub max_decisions: usize,
     pub max_questions: usize,
@@ -41,6 +44,7 @@ impl Default for Config {
             knowledge_dir: ".claude/knowledge".to_string(),
             model: None,
             idle_daemon_secs: 600,
+            min_interval_secs: 45,
             obs_max_turns: 30,
             max_decisions: 15,
             max_questions: 15,
@@ -58,6 +62,7 @@ struct PartialConfig {
     knowledge_dir: Option<String>,
     model: Option<String>,
     idle_daemon_secs: Option<u64>,
+    min_interval_secs: Option<u64>,
     obs_max_turns: Option<u32>,
     max_decisions: Option<usize>,
     max_questions: Option<usize>,
@@ -122,6 +127,9 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
     if let Some(v) = get_env("IDLE_DAEMON_SECS").and_then(|s| s.parse().ok()) {
         cfg.idle_daemon_secs = v;
     }
+    if let Some(v) = get_env("MIN_INTERVAL_SECS").and_then(|s| s.parse().ok()) {
+        cfg.min_interval_secs = v;
+    }
     if let Some(v) = get_env("OBS_MAX_TURNS").and_then(|s| s.parse().ok()) {
         cfg.obs_max_turns = v;
     }
@@ -153,6 +161,9 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
             }
             if let Some(v) = p.idle_daemon_secs {
                 cfg.idle_daemon_secs = v;
+            }
+            if let Some(v) = p.min_interval_secs {
+                cfg.min_interval_secs = v;
             }
             if let Some(v) = p.obs_max_turns {
                 cfg.obs_max_turns = v;

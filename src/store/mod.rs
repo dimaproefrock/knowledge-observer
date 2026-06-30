@@ -9,6 +9,7 @@ pub mod knowledge_store;
 pub mod migrate;
 pub mod observer_hint;
 pub mod observer_state;
+pub mod observer_stats;
 
 use std::path::Path;
 

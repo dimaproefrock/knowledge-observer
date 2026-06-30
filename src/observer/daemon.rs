@@ -355,9 +355,20 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
     use crate::observer::{apply, contract, tail};
 
     let project_dir_str = project_dir.to_string_lossy().to_string();
-    let kdir = knowledge_dir_for(project_dir);
+    let cfg = Config::resolve(project_dir);
+    let kdir = cfg.knowledge_dir_abs(project_dir);
 
     let state = observer_state::load(&kdir, session_id);
+
+    // THROTTLE: coalesce rapid Stop-hook triggers into one run. If the last observer
+    // run for this session was less than `min_interval_secs` ago, skip this pass
+    // entirely WITHOUT advancing the watermark or saving any state — the new turns
+    // stay unconsumed and are picked up by the next trigger after the cooldown.
+    // (First run: last_run_at == 0 → far in the past → not throttled.)
+    if now_secs().saturating_sub(state.last_run_at) < cfg.min_interval_secs {
+        eprintln!("[daemon] throttled (cooldown) — skipping pass for {session_id}");
+        return;
+    }
 
     // Read the transcript + tail new lines since the watermark, reconciling for
     // rotation/rewind (stem from the hook-provided transcript path).
@@ -435,6 +446,8 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
         Ok(s) => s,
         Err(e) => {
             eprintln!("[daemon] observer extraction failed for {session_id}: {e}");
+            // A failed `claude` call still consumed subscription usage → record it.
+            crate::store::observer_stats::record_run(&kdir, 0, false, cfg.min_interval_secs);
             persist_advanced_state(
                 &kdir,
                 session_id,
@@ -450,6 +463,7 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
 
     let result = contract::parse(&stdout);
     let applied = apply::apply_ops_store(&project_dir_str, session_id, &result);
+    crate::store::observer_stats::record_run(&kdir, applied as i64, true, cfg.min_interval_secs);
     eprintln!("[daemon] applied {applied} op(s) for session {session_id}");
 
     // Persist state: keep the new rolling_summary if the extractor produced one.
@@ -492,6 +506,8 @@ fn persist_trigger_state(
         rolling_summary: prev.rolling_summary.clone(),
         observer_sid: prev.observer_sid.clone(),
         turn_count: prev.turn_count,
+        // No observer run happened on this no-new-turns path → carry the prior value.
+        last_run_at: prev.last_run_at,
     };
     if let Err(e) = observer_state::save(knowledge_dir, session_id, &next) {
         eprintln!("[daemon] persist state failed for {session_id}: {e}");
@@ -516,6 +532,9 @@ fn persist_advanced_state(
         rolling_summary: rolling_summary.to_string(),
         observer_sid: observer_sid.to_string(),
         turn_count,
+        // This is only called after a real observer-agent run → stamp it now so the
+        // next trigger's throttle window starts from here.
+        last_run_at: now_secs(),
     };
     if let Err(e) = observer_state::save(knowledge_dir, session_id, &next) {
         eprintln!("[daemon] persist state failed for {session_id}: {e}");
