@@ -1,6 +1,6 @@
 [package]
 name = "knowledge-observer"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "Transparent knowledge observer for Claude Code — a host-independent plugin."
 license = "MIT"

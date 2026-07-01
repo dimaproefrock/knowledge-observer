@@ -1,6 +1,6 @@
 {
   "name": "knowledge-observer",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "displayName": "Knowledge Observer",
   "description": "Transparent background knowledge observer for Claude Code — builds a human-readable knowledge graph of your project's decisions, facts, and open questions, and feeds it back into every session.",
   "author": { "name": "Dima Pröfrock" },
