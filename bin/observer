@@ -49,13 +49,17 @@ else
     mkdir -p "${data}"
     lock="${data}/.dl-${ver}.lock"
     if mkdir "${lock}" 2>/dev/null; then
+      # Release the lock on ANY exit from here on. Without this, a curl/wget failure
+      # under `set -e` would abort the script BEFORE the success-path rmdir, leaving the
+      # lock dir behind → every later launch wedges in the waiter branch forever.
+      trap 'rmdir "${lock}" 2>/dev/null || true' EXIT
       tmp="${cached}.part.$$"
       url="https://github.com/dimaproefrock/knowledge-observer/releases/download/${ver}/${asset}"
       echo "knowledge-observer: fetching ${asset} (${ver})…" >&2
       if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "${url}" -o "${tmp}"
+        curl -fsSL "${url}" -o "${tmp}" || { rmdir "${lock}" 2>/dev/null || true; echo "knowledge-observer: download failed" >&2; exit 1; }
       elif command -v wget >/dev/null 2>&1; then
-        wget -qO "${tmp}" "${url}"
+        wget -qO "${tmp}" "${url}" || { rmdir "${lock}" 2>/dev/null || true; echo "knowledge-observer: download failed" >&2; exit 1; }
       else
         rmdir "${lock}" 2>/dev/null || true
         echo "knowledge-observer: need curl or wget to fetch the binary" >&2; exit 1

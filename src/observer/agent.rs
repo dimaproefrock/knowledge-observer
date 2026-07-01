@@ -49,6 +49,7 @@ pub fn run_extraction(
     observer_sid: &str,
     is_first: bool,
     input_text: &str,
+    model: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
     ephemeral::run_resumable_turn(
@@ -56,6 +57,7 @@ pub fn run_extraction(
         observer_sid,
         !is_first,
         input_text,
+        model,
         timeout,
     )
 }
@@ -205,6 +207,7 @@ mod tests {
             &sid,
             true,
             "Remember the codeword BANANA47 for the rest of this conversation. Reply with just: OK.",
+            None,
             OBS_TIMEOUT,
         );
         eprintln!("--- create turn -> {t1:?}");
@@ -213,6 +216,7 @@ mod tests {
             &sid,
             false,
             "What was the codeword I asked you to remember? Reply with only the codeword.",
+            None,
             OBS_TIMEOUT,
         );
 
@@ -265,6 +269,7 @@ mod tests {
             &sid,
             true,
             "Reply with just: OK.",
+            None,
             OBS_TIMEOUT,
         );
         eprintln!("--- observer run -> {r:?}");
@@ -297,6 +302,7 @@ mod tests {
             &sid,
             true,
             "Return ONLY this JSON object and nothing else: {\"ops\": [], \"rolling_summary\": \"ok\"}",
+            None,
             OBS_TIMEOUT,
         );
         let elapsed = start.elapsed();

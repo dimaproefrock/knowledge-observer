@@ -40,7 +40,7 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 use crate::ipc::{IpcRequest, IpcResponse};
-use crate::observer::agent::{self, OBS_MAX_TURNS, OBS_TIMEOUT};
+use crate::observer::agent::{self, OBS_TIMEOUT};
 use crate::store::observer_state::{self, ObserverState};
 
 /// Idle-shutdown default window (seconds). The per-project `Config::idle_daemon_secs`
@@ -329,12 +329,13 @@ pub(crate) enum TurnMode {
 }
 
 /// Decide the turn mode from the persisted per-session state (pure, testable):
-/// empty `observer_sid` → Create; else `Reseed` once `turn_count >= OBS_MAX_TURNS`;
-/// otherwise `Resume`.
-pub(crate) fn decide_turn_mode(state: &ObserverState) -> TurnMode {
+/// empty `observer_sid` → Create; else `Reseed` once `turn_count >= max_turns`;
+/// otherwise `Resume`. `max_turns` comes from `Config::obs_max_turns` (defaults to
+/// [`OBS_MAX_TURNS`]).
+pub(crate) fn decide_turn_mode(state: &ObserverState, max_turns: u32) -> TurnMode {
     if state.observer_sid.trim().is_empty() {
         TurnMode::Create
-    } else if agent::should_reseed(state.turn_count, OBS_MAX_TURNS) {
+    } else if agent::should_reseed(state.turn_count, max_turns) {
         TurnMode::Reseed
     } else {
         TurnMode::Resume
@@ -415,8 +416,15 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
     let dag_excerpt = crate::observer::dag_excerpt(&kdir, DAG_EXCERPT_LIMIT);
 
     // Decide create/resume/reseed and build the matching observer-agent input.
-    let mode = decide_turn_mode(&state);
-    let prompt = contract::EXTRACTION_PROMPT;
+    let mode = decide_turn_mode(&state, cfg.obs_max_turns);
+    // Honor the optional `prompt_extra` knob: append it to the built-in extraction
+    // prompt when set + non-empty, otherwise use the const as-is.
+    let prompt_owned = cfg
+        .prompt_extra
+        .as_deref()
+        .filter(|e| !e.trim().is_empty())
+        .map(|extra| format!("{}\n\n{}", contract::EXTRACTION_PROMPT, extra));
+    let prompt: &str = prompt_owned.as_deref().unwrap_or(contract::EXTRACTION_PROMPT);
     let (observer_sid, turn_count, is_first, input) = match mode {
         TurnMode::Create => {
             let sid = agent::new_observer_sid();
@@ -441,6 +449,7 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
         &observer_sid,
         is_first,
         &input,
+        cfg.model.as_deref(),
         OBS_TIMEOUT,
     ) {
         Ok(s) => s,
@@ -907,6 +916,7 @@ pub fn run_trigger_subcommand() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observer::agent::OBS_MAX_TURNS;
     use serde_json::json;
 
     fn tmp_knowledge_dir() -> PathBuf {
@@ -1093,27 +1103,27 @@ mod tests {
     #[test]
     fn decide_turn_mode_create_resume_reseed() {
         let s0 = ObserverState::default();
-        assert_eq!(decide_turn_mode(&s0), TurnMode::Create);
+        assert_eq!(decide_turn_mode(&s0, OBS_MAX_TURNS), TurnMode::Create);
 
         let s1 = ObserverState {
             observer_sid: "obs-1".into(),
             turn_count: OBS_MAX_TURNS - 1,
             ..Default::default()
         };
-        assert_eq!(decide_turn_mode(&s1), TurnMode::Resume);
+        assert_eq!(decide_turn_mode(&s1, OBS_MAX_TURNS), TurnMode::Resume);
 
         let s2 = ObserverState {
             observer_sid: "obs-1".into(),
             turn_count: OBS_MAX_TURNS,
             ..Default::default()
         };
-        assert_eq!(decide_turn_mode(&s2), TurnMode::Reseed);
+        assert_eq!(decide_turn_mode(&s2, OBS_MAX_TURNS), TurnMode::Reseed);
         let s3 = ObserverState {
             observer_sid: "obs-1".into(),
             turn_count: OBS_MAX_TURNS + 5,
             ..Default::default()
         };
-        assert_eq!(decide_turn_mode(&s3), TurnMode::Reseed);
+        assert_eq!(decide_turn_mode(&s3, OBS_MAX_TURNS), TurnMode::Reseed);
     }
 
     #[test]

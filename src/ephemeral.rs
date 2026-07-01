@@ -107,10 +107,17 @@ pub(crate) fn run_resumable_turn(
     session_id: &str,
     resume: bool,
     prompt: &str,
+    model: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
     let flag = if resume { "--resume" } else { "--session-id" };
-    let args = [flag, session_id, "--setting-sources", "user"];
+    let mut args = vec![flag, session_id, "--setting-sources", "user"];
+    // A configured model keeps the background extractor off the (often Opus) account
+    // default. The `claude` CLI accepts aliases like `haiku`.
+    if let Some(m) = model.filter(|m| !m.trim().is_empty()) {
+        args.push("--model");
+        args.push(m);
+    }
     // Mark this `claude` as the observer's own agent. If the plugin is installed at user
     // scope its hooks load even here; this env var (inherited by those hook subprocesses)
     // makes them bail in main(), preventing an unbounded self-observation loop.

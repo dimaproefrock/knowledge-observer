@@ -42,7 +42,10 @@ impl Default for Config {
         Config {
             enabled: true,
             knowledge_dir: ".claude/knowledge".to_string(),
-            model: None,
+            // Cheap default for a background extractor; users override via
+            // observer.json / OBSERVER_MODEL / CLAUDE_PLUGIN_OPTION_model.
+            // The `claude` CLI accepts the `haiku` alias.
+            model: Some("haiku".to_string()),
             idle_daemon_secs: 600,
             min_interval_secs: 45,
             obs_max_turns: 30,
@@ -218,6 +221,8 @@ mod tests {
         let cfg = resolve_layered(&no_env, None);
         assert_eq!(cfg, Config::default());
         assert!(!Path::new(&cfg.knowledge_dir).is_absolute(), "default is relative");
+        // Cheap model by default for the background extractor.
+        assert_eq!(cfg.model.as_deref(), Some("haiku"), "default model is the cheap haiku alias");
     }
 
     #[test]
