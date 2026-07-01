@@ -59,6 +59,13 @@ pub fn reconcile_watermark(
     }
 }
 
+/// Marker prefixing observer-injected hint context (the `[Knowledge] …` UserPromptSubmit
+/// hints + index-delta lines built in [`crate::observer`]). Injected `additionalContext`
+/// is delivered via `hookSpecificOutput` and is NOT persisted to the JSONL transcript, so
+/// this filter is a **defensive safety-net**: should such text ever leak into the tailed
+/// transcript, `is_injected` drops it so the observer never re-records its own output.
+pub const INJECTED_MARKER: &str = "[Knowledge]";
+
 /// Returns false when `sentinel` is empty (no injection yet). When a non-empty
 /// sentinel is given, returns true if the line contains it. (The injected-context
 /// filter so the watcher can skip its own injections.)
@@ -260,6 +267,14 @@ mod tests {
     #[test]
     fn is_injected_non_matching_is_false() {
         assert!(!is_injected("ordinary line", "OBS-INJECT"));
+    }
+
+    #[test]
+    fn is_injected_knowledge_marker_matches_hint_lines() {
+        // The armed marker filters observer-injected hint/index lines by prefix.
+        assert!(is_injected("[Knowledge] Index updated: 2 new node(s)", INJECTED_MARKER));
+        assert!(is_injected("prefix [Knowledge] relevance nudge", INJECTED_MARKER));
+        assert!(!is_injected("an ordinary user turn", INJECTED_MARKER));
     }
 
     // ---- strip_tool_results ----

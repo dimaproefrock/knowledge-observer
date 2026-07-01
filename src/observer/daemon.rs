@@ -28,6 +28,7 @@
 //!   port-file.
 
 use std::collections::HashSet;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -60,6 +61,11 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Top-N DAG nodes handed to the observer as dedup context.
 const DAG_EXCERPT_LIMIT: usize = 40;
+
+/// Floor (seconds) applied to the EFFECTIVE per-session cooldown in the throttle
+/// skip-check, so a `min_interval_secs = 0` misconfig can't remove ALL throttling.
+/// Only the effective cooldown is clamped — the config value itself is untouched.
+const MIN_INTERVAL_FLOOR_SECS: u64 = 5;
 
 /// The port-file written to `<knowledge_dir>/.daemon`. Advertises the loopback
 /// endpoint + token so clients (hooks, the GUI, `ensure_daemon`) can reach the
@@ -177,6 +183,102 @@ fn health_ping(pf: &PortFile) -> bool {
 /// so it is unit-testable without a second process.
 fn is_existing_daemon_live(knowledge_dir: &Path, probe: impl Fn(&PortFile) -> bool) -> bool {
     read_port_file(knowledge_dir).map(|pf| probe(&pf)).unwrap_or(false)
+}
+
+// ===================== single-writer election (cross-process file lock) =====================
+
+/// The lock-file guarding single-writer election: `<knowledge_dir>/.daemon.lock`.
+fn daemon_lock_path(knowledge_dir: &Path) -> PathBuf {
+    knowledge_dir.join(".daemon.lock")
+}
+
+/// Acquire a **cross-process exclusive** lock on `<knowledge_dir>/.daemon.lock`.
+///
+/// Returns the locked [`File`] (an RAII guard) on success — the caller MUST hold it for
+/// the daemon's whole lifetime; the OS releases the lock when the `File` drops OR the
+/// process dies (crash-safe → no stale-lock problem). Returns `None` when another daemon
+/// already holds the lock (the spawn-race loser). This is the authoritative single-writer
+/// election, replacing the TOCTOU port-file check.
+fn acquire_daemon_lock(knowledge_dir: &Path) -> Option<File> {
+    if let Err(e) = std::fs::create_dir_all(knowledge_dir) {
+        eprintln!("[observer-daemon] lock dir create failed: {e}");
+        return None;
+    }
+    platform_lock::acquire(&daemon_lock_path(knowledge_dir))
+}
+
+/// Cross-process exclusive file lock, no external crates (std + a minimal `extern "C"`).
+#[cfg(windows)]
+mod platform_lock {
+    use std::fs::File;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::path::Path;
+
+    /// Open the lock file with an EXCLUSIVE share mode (`share_mode(0)` denies all
+    /// sharing, even within the same process) → a second opener fails with a sharing
+    /// violation, returning `None`. The returned `File` holds the lock until it drops
+    /// (or the process dies, when the OS closes the handle).
+    pub fn acquire(path: &Path) -> Option<File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .share_mode(0)
+            .open(path)
+            .ok()
+    }
+}
+
+/// Cross-process exclusive file lock via `flock(2)` (no `libc` crate).
+#[cfg(unix)]
+mod platform_lock {
+    use std::fs::File;
+    use std::os::raw::c_int;
+    use std::os::unix::io::AsRawFd;
+    use std::path::Path;
+
+    const LOCK_EX: c_int = 2;
+    const LOCK_NB: c_int = 4;
+
+    extern "C" {
+        fn flock(fd: c_int, op: c_int) -> c_int;
+    }
+
+    /// Open the lock file, then `flock(LOCK_EX | LOCK_NB)`. A non-zero return → the lock
+    /// is held by another open file description (another daemon) → `None`. Hold the
+    /// `File` (keeps the fd open) for the lock's lifetime; closing it (drop/process
+    /// death) releases the lock.
+    pub fn acquire(path: &Path) -> Option<File> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)
+            .ok()?;
+        // SAFETY: `flock` is a plain syscall over a valid, owned fd; no memory is shared.
+        let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+        if rc == 0 {
+            Some(file)
+        } else {
+            None
+        }
+    }
+}
+
+/// Fallback for exotic targets: no OS lock primitive → best-effort "always acquire"
+/// (single-writer then rests on the port-file pre-check alone, as before this change).
+#[cfg(not(any(windows, unix)))]
+mod platform_lock {
+    use std::fs::File;
+    use std::path::Path;
+    pub fn acquire(path: &Path) -> Option<File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)
+            .ok()
+    }
 }
 
 // ===================== idle-shutdown decision (pure) =====================
@@ -366,7 +468,10 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
     // entirely WITHOUT advancing the watermark or saving any state — the new turns
     // stay unconsumed and are picked up by the next trigger after the cooldown.
     // (First run: last_run_at == 0 → far in the past → not throttled.)
-    if now_secs().saturating_sub(state.last_run_at) < cfg.min_interval_secs {
+    // Floor the EFFECTIVE cooldown so a 0/misconfig can't disable throttling entirely
+    // (the config value itself stays untouched — only this skip-check is clamped).
+    let cooldown = cfg.min_interval_secs.max(MIN_INTERVAL_FLOOR_SECS);
+    if now_secs().saturating_sub(state.last_run_at) < cooldown {
         eprintln!("[daemon] throttled (cooldown) — skipping pass for {session_id}");
         return;
     }
@@ -397,7 +502,10 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
         return;
     }
 
-    // Strip injected lines (empty sentinel = nothing) + large tool_results.
+    // Injected additionalContext is NOT persisted to the transcript, so there is nothing
+    // to strip here — the empty sentinel keeps `is_injected` a no-op (filtering on the
+    // `[Knowledge]` marker would risk dropping a real turn that merely mentions it, for no
+    // gain). + shorten large tool_results.
     let lines: Vec<String> = raw_lines
         .into_iter()
         .filter(|l| !tail::is_injected(l, ""))
@@ -620,7 +728,23 @@ pub fn serve() {
     let cfg = Config::resolve(&project_dir);
     let knowledge_dir = cfg.knowledge_dir_abs(&project_dir);
 
-    // Spawn-race: if a live daemon already owns this project, we are the loser.
+    // Single-writer election (AUTHORITATIVE): acquire the cross-process exclusive lock
+    // BEFORE binding. If another daemon holds it, we are the spawn-race loser → exit.
+    // The guard is held for the entire serve loop (bound to `serve`'s scope) and the OS
+    // releases it when it drops on return or on process death (crash-safe).
+    let _daemon_lock = match acquire_daemon_lock(&knowledge_dir) {
+        Some(f) => f,
+        None => {
+            eprintln!(
+                "[observer-daemon] another daemon serves {} — exiting (lock held)",
+                knowledge_dir.display()
+            );
+            return;
+        }
+    };
+
+    // Fast pre-check (best-effort only; the LOCK above is the authority). A live daemon
+    // could not hold the lock while we do, so this normally sees only a stale port-file.
     if is_existing_daemon_live(&knowledge_dir, health_ping) {
         eprintln!(
             "[observer-daemon] another daemon already serves {} — exiting (race loser)",
@@ -986,6 +1110,25 @@ mod tests {
     fn spawn_race_no_port_file_is_not_loser() {
         let dir = tmp_knowledge_dir();
         assert!(!is_existing_daemon_live(&dir, |_| true));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------------- single-writer file lock ----------------
+
+    #[test]
+    fn daemon_lock_is_exclusive_and_reacquirable() {
+        let dir = tmp_knowledge_dir();
+        // First acquire succeeds and holds the cross-process lock.
+        let first = acquire_daemon_lock(&dir).expect("first acquire succeeds");
+        // A second acquire for the SAME path fails while the first guard is held.
+        assert!(
+            acquire_daemon_lock(&dir).is_none(),
+            "second acquire must fail while the first lock is held"
+        );
+        // Releasing the first guard frees the lock → re-acquire succeeds.
+        drop(first);
+        let second = acquire_daemon_lock(&dir).expect("re-acquire after drop succeeds");
+        drop(second);
         std::fs::remove_dir_all(&dir).ok();
     }
 
