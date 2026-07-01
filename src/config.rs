@@ -31,6 +31,11 @@ pub struct Config {
     pub obs_max_turns: u32,
     pub max_decisions: usize,
     pub max_questions: usize,
+    /// Circuit-breaker: max observer-agent runs allowed within `breaker_window_secs`
+    /// for one project before the daemon refuses to spawn + marks the store paused.
+    pub breaker_max: usize,
+    /// Circuit-breaker: rolling window (seconds) over which `breaker_max` runs are counted.
+    pub breaker_window_secs: u64,
     /// Appended to the built-in extraction prompt (safe customization).
     pub prompt_extra: Option<String>,
     /// Full prompt override (advanced; must keep the JSON ops contract).
@@ -51,6 +56,8 @@ impl Default for Config {
             obs_max_turns: 30,
             max_decisions: 15,
             max_questions: 15,
+            breaker_max: 25,
+            breaker_window_secs: 600,
             prompt_extra: None,
             prompt_file: None,
         }
@@ -69,6 +76,8 @@ struct PartialConfig {
     obs_max_turns: Option<u32>,
     max_decisions: Option<usize>,
     max_questions: Option<usize>,
+    breaker_max: Option<usize>,
+    breaker_window_secs: Option<u64>,
     prompt_extra: Option<String>,
     prompt_file: Option<String>,
 }
@@ -142,6 +151,12 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
     if let Some(v) = get_env("MAX_QUESTIONS").and_then(|s| s.parse().ok()) {
         cfg.max_questions = v;
     }
+    if let Some(v) = get_env("BREAKER_MAX").and_then(|s| s.parse().ok()) {
+        cfg.breaker_max = v;
+    }
+    if let Some(v) = get_env("BREAKER_WINDOW_SECS").and_then(|s| s.parse().ok()) {
+        cfg.breaker_window_secs = v;
+    }
     if let Some(v) = get_env("PROMPT_EXTRA") {
         cfg.prompt_extra = Some(v);
     }
@@ -176,6 +191,12 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
             }
             if let Some(v) = p.max_questions {
                 cfg.max_questions = v;
+            }
+            if let Some(v) = p.breaker_max {
+                cfg.breaker_max = v;
+            }
+            if let Some(v) = p.breaker_window_secs {
+                cfg.breaker_window_secs = v;
             }
             if let Some(v) = p.prompt_extra {
                 cfg.prompt_extra = Some(v);
@@ -223,6 +244,9 @@ mod tests {
         assert!(!Path::new(&cfg.knowledge_dir).is_absolute(), "default is relative");
         // Cheap model by default for the background extractor.
         assert_eq!(cfg.model.as_deref(), Some("haiku"), "default model is the cheap haiku alias");
+        // Circuit-breaker defaults: 25 runs per 600s window.
+        assert_eq!(cfg.breaker_max, 25, "default circuit-breaker cap is 25 runs");
+        assert_eq!(cfg.breaker_window_secs, 600, "default breaker window is 600s");
     }
 
     #[test]

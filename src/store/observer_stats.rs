@@ -38,6 +38,16 @@ pub struct ObserverStats {
     pub runs_24h: u64,
     pub min_interval_secs: u64,
     pub updated_at: u64,
+    /// Circuit-breaker state: `true` when the daemon refused a spawn (too many recent
+    /// runs) and marked the store paused. Consumed by the host status bar. Auto-clears
+    /// on the next successful `record_run`. A blocked spawn is NOT recorded as a run,
+    /// so the recent-window count decays and later triggers can resume.
+    #[serde(default)]
+    pub paused: bool,
+    /// Human-readable reason the circuit-breaker paused (empty when not paused).
+    /// Consumed by the host status bar alongside `paused`.
+    #[serde(default)]
+    pub paused_reason: String,
     pub recent: Vec<RunRec>,
 }
 
@@ -54,6 +64,8 @@ impl Default for ObserverStats {
             runs_24h: 0,
             min_interval_secs: 0,
             updated_at: 0,
+            paused: false,
+            paused_reason: String::new(),
             recent: Vec::new(),
         }
     }
@@ -117,9 +129,39 @@ pub fn record_run(knowledge_dir: &Path, ops: i64, ok: bool, min_interval_secs: u
     stats.updated_at = now;
     stats.min_interval_secs = min_interval_secs;
     stats.schema = 1;
+    // A successful (recorded) run means the circuit-breaker is not tripped: clear paused.
+    stats.paused = false;
+    stats.paused_reason = String::new();
 
     if let Err(e) = write_atomic(knowledge_dir, &stats) {
         eprintln!("[observer-stats] write failed: {e}");
+    }
+}
+
+/// Count recorded runs within the last `window_secs` (rolling window ending now).
+/// Reads `observer-stats.json` (missing/corrupt → 0) and reuses [`count_within`].
+/// Used by the daemon's circuit-breaker gate to decide whether to refuse a spawn.
+pub fn count_in_window(knowledge_dir: &Path, window_secs: u64) -> usize {
+    let stats = load(knowledge_dir);
+    count_within(&stats.recent, now_secs(), window_secs) as usize
+}
+
+/// Mark the store paused (circuit-breaker tripped) with a human-readable `reason`.
+///
+/// Loads-or-defaults the stats file, sets `paused=true` + `paused_reason=reason`,
+/// refreshes `updated_at`, and writes atomically. Deliberately does NOT push a
+/// `RunRec`: a blocked spawn is not a run, so the recent-window count keeps decaying
+/// and a later trigger auto-resumes once it drops below the cap. Best-effort: logs +
+/// returns on any IO/serde error, never panics.
+pub fn set_paused(knowledge_dir: &Path, reason: &str) {
+    let mut stats = load(knowledge_dir);
+    stats.paused = true;
+    stats.paused_reason = reason.to_string();
+    stats.updated_at = now_secs();
+    stats.schema = 1;
+
+    if let Err(e) = write_atomic(knowledge_dir, &stats) {
+        eprintln!("[observer-stats] set_paused write failed: {e}");
     }
 }
 
@@ -226,6 +268,68 @@ mod tests {
         assert_eq!(pruned.len(), 1, "the >24h record is pruned");
         assert_eq!(count_within(&pruned, now, 24 * 60 * 60), 1);
         assert_eq!(count_within(&pruned, now, 60 * 60), 1);
+    }
+
+    #[test]
+    fn count_in_window_counts_recent_runs() {
+        let dir = temp_dir();
+        // Three runs recorded now → all within a 10m window.
+        record_run(&dir, 1, true, 45);
+        record_run(&dir, 1, true, 45);
+        record_run(&dir, 1, true, 45);
+        assert_eq!(count_in_window(&dir, 10 * 60), 3);
+        // A 0-second window counts only runs at exactly `now` — still all 3 here.
+        assert!(count_in_window(&dir, 0) <= 3);
+        // Missing file → 0 (no panic).
+        let empty = temp_dir();
+        std::fs::remove_dir_all(&empty).ok();
+        assert_eq!(count_in_window(&empty, 10 * 60), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_paused_then_record_run_clears_it() {
+        let dir = temp_dir();
+        set_paused(&dir, "circuit breaker tripped");
+        let s = load(&dir);
+        assert!(s.paused, "set_paused marks paused=true");
+        assert_eq!(s.paused_reason, "circuit breaker tripped");
+        assert!(s.updated_at > 0, "updated_at refreshed");
+        // set_paused must NOT push a run record.
+        assert_eq!(s.total_runs, 0, "a blocked spawn is not a run");
+        assert!(s.recent.is_empty(), "set_paused records no RunRec");
+
+        // A successful run clears the paused state.
+        record_run(&dir, 2, true, 45);
+        let s2 = load(&dir);
+        assert!(!s2.paused, "record_run clears paused");
+        assert_eq!(s2.paused_reason, "");
+        assert_eq!(s2.total_runs, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn schema_roundtrips_paused_fields() {
+        let dir = temp_dir();
+        set_paused(&dir, "too many runs");
+        // Re-read from disk → the two new fields round-trip.
+        let s = load(&dir);
+        assert!(s.paused);
+        assert_eq!(s.paused_reason, "too many runs");
+
+        // A stats file predating the fields (missing paused/paused_reason) still loads
+        // via serde defaults → paused=false, paused_reason="".
+        let legacy = r#"{
+            "schema": 1, "total_runs": 5, "last_run_at": 100, "last_ops": 2,
+            "last_ok": true, "runs_10m": 1, "runs_1h": 3, "runs_24h": 5,
+            "min_interval_secs": 45, "updated_at": 100, "recent": []
+        }"#;
+        std::fs::write(stats_path(&dir), legacy).unwrap();
+        let s2 = load(&dir);
+        assert_eq!(s2.total_runs, 5);
+        assert!(!s2.paused, "legacy file → paused defaults false");
+        assert_eq!(s2.paused_reason, "");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

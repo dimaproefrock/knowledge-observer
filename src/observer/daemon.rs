@@ -413,6 +413,24 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
         persist_trigger_state(&kdir, session_id, &current_stem, new_watermark, &state, None);
         return;
     }
+
+    // CIRCUIT BREAKER: hard cap on paid observer-agent spawns per project. If too many
+    // runs happened in the recent window, REFUSE to spawn and mark the store paused
+    // (visible via observer-stats.json → host status bar). Like the throttle above, a
+    // breaker-skip must NOT advance the watermark or record a run — so no turns are lost
+    // and the recent-window count decays as it rolls, letting a later trigger resume
+    // (the success-path `record_run` clears `paused`).
+    let recent = crate::store::observer_stats::count_in_window(&kdir, cfg.breaker_window_secs);
+    if recent >= cfg.breaker_max {
+        let reason = format!(
+            "circuit breaker: {} observer runs in {}s ≥ {} — paused",
+            recent, cfg.breaker_window_secs, cfg.breaker_max
+        );
+        eprintln!("[daemon] {reason}");
+        crate::store::observer_stats::set_paused(&kdir, &reason);
+        return; // do NOT spawn; watermark NOT advanced (turns coalesce into a later pass)
+    }
+
     let dag_excerpt = crate::observer::dag_excerpt(&kdir, DAG_EXCERPT_LIMIT);
 
     // Decide create/resume/reseed and build the matching observer-agent input.
