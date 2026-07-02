@@ -34,9 +34,12 @@ case "${os}" in
 esac
 
 # --- resolve the binary to run into $bin ---
-if [ -n "${OBSERVER_BIN:-}" ] && [ -x "${OBSERVER_BIN}" ]; then
+if [ -n "${OBSERVER_BIN:-}" ] && [ -e "${OBSERVER_BIN}" ]; then
   bin="${OBSERVER_BIN}"
-elif [ -x "${here}/${localname}" ]; then
+elif [ -e "${here}/${localname}" ]; then
+  # `-e` (exists), not `-x`: a bundled `.exe` is executable on Windows, but the MSYS/
+  # git-bash exec bit can read false → without this the launcher wrongly falls through
+  # to the network download and blocks the hook for tens of seconds.
   bin="${here}/${localname}"
 else
   # per-OS release binary, downloaded once per version. Several launches can fire at
@@ -44,7 +47,7 @@ else
   # downloader; the others wait for the finished binary instead of racing.
   ver="$(cat "${here}/../VERSION" 2>/dev/null | tr -d ' \t\r\n')"
   cached="${data}/observer-${ver}-${asset}"
-  if [ ! -x "${cached}" ]; then
+  if [ ! -e "${cached}" ]; then
     [ -n "${ver}" ] || { echo "knowledge-observer: no VERSION file and no local binary found" >&2; exit 1; }
     mkdir -p "${data}"
     lock="${data}/.dl-${ver}.lock"
@@ -56,10 +59,13 @@ else
       tmp="${cached}.part.$$"
       url="https://github.com/dimaproefrock/knowledge-observer/releases/download/${ver}/${asset}"
       echo "knowledge-observer: fetching ${asset} (${ver})…" >&2
+      # Hard time caps: a hook must never block for tens of seconds on a slow/hanging
+      # fetch (Claude's hook timeout is ~30s). Fail fast instead — the plugin degrades to
+      # "no observation this turn", not a frozen session.
       if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "${url}" -o "${tmp}" || { rmdir "${lock}" 2>/dev/null || true; echo "knowledge-observer: download failed" >&2; exit 1; }
+        curl -fsSL --connect-timeout 5 --max-time 20 "${url}" -o "${tmp}" || { rmdir "${lock}" 2>/dev/null || true; echo "knowledge-observer: download failed" >&2; exit 1; }
       elif command -v wget >/dev/null 2>&1; then
-        wget -qO "${tmp}" "${url}" || { rmdir "${lock}" 2>/dev/null || true; echo "knowledge-observer: download failed" >&2; exit 1; }
+        wget -q --connect-timeout=5 --timeout=20 --tries=1 -O "${tmp}" "${url}" || { rmdir "${lock}" 2>/dev/null || true; echo "knowledge-observer: download failed" >&2; exit 1; }
       else
         rmdir "${lock}" 2>/dev/null || true
         echo "knowledge-observer: need curl or wget to fetch the binary" >&2; exit 1
@@ -68,9 +74,10 @@ else
       mv "${tmp}" "${cached}"
       rmdir "${lock}" 2>/dev/null || true
     else
+      # Another launch is downloading; wait briefly, but NEVER past the hook timeout.
       n=0
-      while [ ! -x "${cached}" ] && [ "${n}" -lt 60 ]; do sleep 0.5; n=$((n + 1)); done
-      [ -x "${cached}" ] || { echo "knowledge-observer: timed out waiting for the binary download" >&2; exit 1; }
+      while [ ! -e "${cached}" ] && [ "${n}" -lt 16 ]; do sleep 0.5; n=$((n + 1)); done
+      [ -e "${cached}" ] || { echo "knowledge-observer: timed out waiting for the binary download" >&2; exit 1; }
     fi
   fi
   bin="${cached}"
