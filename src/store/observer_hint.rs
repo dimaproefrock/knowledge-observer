@@ -21,6 +21,10 @@ pub struct HintState {
     pub informed_node_ids: Vec<String>,
     /// High-water mark (node `datum`) up to which deltas were already reported.
     pub last_informed_datum: String,
+    /// Unix seconds of the last user-visible write-delta feedback for this session.
+    /// `0` = never (first turn seeds a baseline instead of reporting).
+    #[serde(default)]
+    pub last_feedback_at: u64,
 }
 
 impl HintState {
@@ -144,12 +148,27 @@ mod tests {
         let dir = temp_dir();
         let mut state = HintState::default();
         state.mark_informed("node-a", "2026-06-17T10:00:00Z");
+        state.last_feedback_at = 1_700_000_123;
 
         save_state(&dir, "session-1", &state).unwrap();
         let loaded = load_state(&dir, "session-1");
 
         assert_eq!(loaded, state);
+        assert_eq!(loaded.last_feedback_at, 1_700_000_123, "marker round-trips");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_last_feedback_at_defaults_when_absent() {
+        // A state file predating the field still loads → last_feedback_at defaults 0.
+        let dir = temp_dir();
+        super::super::ensure_dir(&hints_dir(&dir)).unwrap();
+        let legacy = r#"{ "informed_node_ids": ["x"], "last_informed_datum": "2026-01-01T00:00:00Z" }"#;
+        std::fs::write(state_path(&dir, "legacy"), legacy).unwrap();
+        let loaded = load_state(&dir, "legacy");
+        assert_eq!(loaded.last_feedback_at, 0, "missing marker → 0");
+        assert_eq!(loaded.informed_node_ids, vec!["x"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

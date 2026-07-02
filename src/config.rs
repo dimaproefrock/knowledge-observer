@@ -21,6 +21,9 @@ use serde::Deserialize;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub enabled: bool,
+    /// When true, the SessionStart/UserPromptSubmit hooks emit a user-visible
+    /// `systemMessage` marking knowledge reads/writes in the TUI transcript. Default off.
+    pub feedback: bool,
     /// Relative (per-project isolation) or absolute (per-project override only).
     pub knowledge_dir: String,
     pub model: Option<String>,
@@ -46,6 +49,10 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             enabled: true,
+            // User-visible knowledge read/write feedback (systemMessage) is ON by
+            // default — the observer runs on the user's subscription, so it should be
+            // transparent. Turn off per-project via observer.json { "feedback": false }.
+            feedback: true,
             knowledge_dir: ".claude/knowledge".to_string(),
             // Cheap default for a background extractor; users override via
             // observer.json / OBSERVER_MODEL / CLAUDE_PLUGIN_OPTION_model.
@@ -69,6 +76,7 @@ impl Default for Config {
 #[serde(default)]
 struct PartialConfig {
     enabled: Option<bool>,
+    feedback: Option<bool>,
     knowledge_dir: Option<String>,
     model: Option<String>,
     idle_daemon_secs: Option<u64>,
@@ -129,6 +137,9 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
     if let Some(v) = get_env("ENABLED").and_then(|s| parse_bool(&s)) {
         cfg.enabled = v;
     }
+    if let Some(v) = get_env("FEEDBACK").and_then(|s| parse_bool(&s)) {
+        cfg.feedback = v;
+    }
     let mut knowledge_dir_from_file = false;
     if let Some(v) = get_env("KNOWLEDGE_DIR") {
         cfg.knowledge_dir = v;
@@ -169,6 +180,9 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
         if let Ok(p) = serde_json::from_str::<PartialConfig>(json) {
             if let Some(v) = p.enabled {
                 cfg.enabled = v;
+            }
+            if let Some(v) = p.feedback {
+                cfg.feedback = v;
             }
             if let Some(v) = p.knowledge_dir {
                 cfg.knowledge_dir = v;
@@ -241,6 +255,7 @@ mod tests {
     fn defaults_when_nothing_set() {
         let cfg = resolve_layered(&no_env, None);
         assert_eq!(cfg, Config::default());
+        assert!(cfg.feedback, "user-visible feedback is ON by default");
         assert!(!Path::new(&cfg.knowledge_dir).is_absolute(), "default is relative");
         // Cheap model by default for the background extractor.
         assert_eq!(cfg.model.as_deref(), Some("haiku"), "default model is the cheap haiku alias");
@@ -261,6 +276,19 @@ mod tests {
         assert_eq!(cfg.knowledge_dir, ".claude/knowledge");
         assert_eq!(cfg.idle_daemon_secs, 1200);
         assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn feedback_from_env_and_file() {
+        // Env can flip it on.
+        let env = |k: &str| match k {
+            "FEEDBACK" => Some("on".to_string()),
+            _ => None,
+        };
+        assert!(resolve_layered(&env, None).feedback, "env FEEDBACK=on enables");
+        // Per-project file wins over env.
+        let cfg = resolve_layered(&env, Some(r#"{ "feedback": false }"#));
+        assert!(!cfg.feedback, "file feedback=false overrides env");
     }
 
     #[test]

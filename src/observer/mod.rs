@@ -250,6 +250,7 @@ mod tests {
         let state = HintState {
             informed_node_ids: vec![],
             last_informed_datum: "2026-06-17T00:00:00Z".to_string(),
+            last_feedback_at: 0,
         };
         let delta = compute_index_delta(&g, "this-session", &state);
         assert_eq!(delta.len(), 1);
@@ -268,6 +269,7 @@ mod tests {
         let state = HintState {
             informed_node_ids: vec![],
             last_informed_datum: "2026-06-17T00:00:00Z".to_string(),
+            last_feedback_at: 0,
         };
         assert!(compute_index_delta(&g, "this-session", &state).is_empty());
     }
@@ -282,6 +284,7 @@ mod tests {
         let state = HintState {
             informed_node_ids: vec![],
             last_informed_datum: "2026-06-17T00:00:00Z".to_string(),
+            last_feedback_at: 0,
         };
         assert!(compute_index_delta(&g, "this-session", &state).is_empty());
     }
@@ -298,6 +301,7 @@ mod tests {
         let state = HintState {
             informed_node_ids: vec!["n1".to_string()],
             last_informed_datum: "2026-06-17T00:00:00Z".to_string(),
+            last_feedback_at: 0,
         };
         assert!(compute_index_delta(&g, "this-session", &state).is_empty());
     }
@@ -314,6 +318,7 @@ mod tests {
         let state = HintState {
             informed_node_ids: vec![],
             last_informed_datum: "2026-06-17T00:00:00Z".to_string(),
+            last_feedback_at: 0,
         };
         assert!(compute_index_delta(&g, "this-session", &state).is_empty());
     }
@@ -329,6 +334,7 @@ mod tests {
         let seeded = HintState {
             informed_node_ids: vec![],
             last_informed_datum: seed_baseline_datum(&g),
+            last_feedback_at: 0,
         };
         assert!(compute_index_delta(&g, "this-session", &seeded).is_empty());
     }

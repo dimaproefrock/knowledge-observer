@@ -146,6 +146,22 @@ pub fn count_in_window(knowledge_dir: &Path, window_secs: u64) -> usize {
     count_within(&stats.recent, now_secs(), window_secs) as usize
 }
 
+/// Sum the store `ops` of successful runs recorded strictly after `since_secs`.
+///
+/// Used by the user-visible write-delta feedback: given a per-session marker
+/// (`last_feedback_at`), how many store ops did the observer apply since we last told
+/// the user? Reads `observer-stats.json` (missing/corrupt → 0), counts only `ok` runs
+/// whose `at > since_secs`. Best-effort/pure over the loaded doc; never panics.
+pub fn ops_since(knowledge_dir: &Path, since_secs: u64) -> i64 {
+    let stats = load(knowledge_dir);
+    stats
+        .recent
+        .iter()
+        .filter(|r| r.at > since_secs && r.ok)
+        .map(|r| r.ops)
+        .sum()
+}
+
 /// Mark the store paused (circuit-breaker tripped) with a human-readable `reason`.
 ///
 /// Loads-or-defaults the stats file, sets `paused=true` + `paused_reason=reason`,
@@ -329,6 +345,32 @@ mod tests {
         assert_eq!(s2.total_runs, 5);
         assert!(!s2.paused, "legacy file → paused defaults false");
         assert_eq!(s2.paused_reason, "");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ops_since_sums_ok_runs_in_window() {
+        let dir = temp_dir();
+        // Seed a stats file with a mix of timestamps + ok flags directly.
+        let stats = ObserverStats {
+            recent: vec![
+                RunRec { at: 100, ops: 5, ok: true },  // before cutoff → excluded
+                RunRec { at: 200, ops: 3, ok: true },  // at cutoff (not strictly >) → excluded
+                RunRec { at: 300, ops: 4, ok: true },  // after cutoff → counted
+                RunRec { at: 400, ops: 7, ok: false }, // after cutoff but failed → excluded
+                RunRec { at: 500, ops: 2, ok: true },  // after cutoff → counted
+            ],
+            ..ObserverStats::default()
+        };
+        write_atomic(&dir, &stats).unwrap();
+
+        assert_eq!(ops_since(&dir, 200), 6, "only ok runs strictly after 200: 4 + 2");
+        assert_eq!(ops_since(&dir, 0), 14, "all ok runs: 5 + 3 + 4 + 2");
+        // Missing file → 0, no panic.
+        let empty = temp_dir();
+        std::fs::remove_dir_all(&empty).ok();
+        assert_eq!(ops_since(&empty, 0), 0);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
