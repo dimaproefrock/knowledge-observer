@@ -33,14 +33,51 @@ struct HookInput {
     session_id: Option<String>,
 }
 
-/// Best-effort read+parse of the hook stdin JSON. Claude writes it immediately, so a
-/// plain blocking read returns promptly; any error degrades to empty fields (we then
-/// fall back to env / current_dir).
+/// Read a single JSON object from stdin **without blocking indefinitely on EOF**.
+///
+/// Claude writes the hook-input JSON to stdin but does not always close it promptly
+/// (observed: the UserPromptSubmit hook's stdin was left open, so a plain
+/// `read_to_string` blocked until Claude's 30s hook timeout). We read on a background
+/// thread and return the instant the accumulated bytes parse as a complete JSON value —
+/// never waiting for EOF. A bounded timeout caps the pathological "nothing parseable
+/// arrives" case. Returns `Value::Null` if nothing usable arrives in time.
+pub(crate) fn read_stdin_json(timeout: std::time::Duration) -> Value {
+    let (tx, rx) = std::sync::mpsc::channel::<Value>();
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stdin.read(&mut chunk) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    // Done the instant we have a complete JSON object — don't wait for EOF.
+                    if let Ok(s) = std::str::from_utf8(&buf) {
+                        if let Ok(v) = serde_json::from_str::<Value>(s.trim()) {
+                            let _ = tx.send(v);
+                            return;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        // EOF / error: best-effort parse of whatever arrived (may be Null).
+        let v = std::str::from_utf8(&buf)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(s.trim()).ok())
+            .unwrap_or(Value::Null);
+        let _ = tx.send(v);
+    });
+    rx.recv_timeout(timeout).unwrap_or(Value::Null)
+}
+
+/// Best-effort read+parse of the hook stdin JSON. Uses the bounded, EOF-independent
+/// [`read_stdin_json`] so a hook can never hang if Claude leaves stdin open; any error
+/// degrades to empty fields (we then fall back to env / current_dir).
 fn read_hook_input() -> HookInput {
-    let mut buf = String::new();
-    // Read to EOF — Claude closes stdin after writing the JSON object.
-    let _ = std::io::stdin().read_to_string(&mut buf);
-    let val: Value = serde_json::from_str(buf.trim()).unwrap_or(Value::Null);
+    let val = read_stdin_json(std::time::Duration::from_secs(3));
     HookInput {
         cwd: val.get("cwd").and_then(Value::as_str).map(str::to_string),
         session_id: val.get("session_id").and_then(Value::as_str).map(str::to_string),

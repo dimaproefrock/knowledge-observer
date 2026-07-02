@@ -971,10 +971,10 @@ struct TriggerInput {
 /// Best-effort read+parse of the Stop-hook stdin JSON. Claude writes the object then
 /// closes stdin, so a plain read-to-EOF returns promptly; any error degrades to all-`None`.
 fn read_trigger_input() -> TriggerInput {
-    use std::io::Read;
-    let mut buf = String::new();
-    let _ = std::io::stdin().read_to_string(&mut buf);
-    parse_trigger_input(&buf)
+    // Bounded, EOF-independent read (Claude may leave the hook's stdin open — see
+    // `crate::cli::read_stdin_json`) so the trigger can't hang waiting for EOF.
+    let v = crate::cli::read_stdin_json(std::time::Duration::from_secs(3));
+    parse_trigger_input(&v.to_string())
 }
 
 /// Pure parse of the Stop-hook stdin JSON → [`TriggerInput`] (unit-testable).
