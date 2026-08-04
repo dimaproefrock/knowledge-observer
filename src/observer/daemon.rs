@@ -366,7 +366,29 @@ fn handle_request(
             eprintln!("[observer-daemon] trigger: session={session_id} transcript={transcript}");
             let sid_for_thread = session_id.clone();
             std::thread::spawn(move || {
-                run_trigger_pass(&project_dir, &sid_for_thread, &transcript_path);
+                // DEFERRED RE-RUN: a throttled trigger must not silently rely on a
+                // future trigger (= the user's NEXT turn) to pick up its delta — if the
+                // user pauses after a decision, the node would wait on them. Instead,
+                // sleep out the remaining cooldown and run the pass then. The in-flight
+                // guard stays held for the whole wait, so rapid triggers during the
+                // deferral coalesce into this one pass (it reads the transcript fresh
+                // at run time). Bounded: normally one deferral suffices.
+                let mut deferrals = 0u32;
+                while let Some(wait_secs) = run_trigger_pass(&project_dir, &sid_for_thread, &transcript_path)
+                {
+                    deferrals += 1;
+                    if deferrals > 3 {
+                        eprintln!(
+                            "[observer-daemon] still throttled after {deferrals} deferrals for {sid_for_thread} — leaving the delta to the next trigger"
+                        );
+                        break;
+                    }
+                    let wait = wait_secs + 2; // small buffer past the cooldown edge
+                    eprintln!(
+                        "[observer-daemon] throttled — deferred pass for {sid_for_thread} in {wait}s"
+                    );
+                    std::thread::sleep(std::time::Duration::from_secs(wait));
+                }
                 end_pass(&sid_for_thread);
             });
 
@@ -454,7 +476,11 @@ pub(crate) fn decide_turn_mode(state: &ObserverState, max_turns: u32) -> TurnMod
 ///
 /// State stores take the knowledge dir DIRECTLY (kdir-direct convention), resolved
 /// from the project root via `Config`.
-pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_path: &Path) {
+pub(crate) fn run_trigger_pass(
+    project_dir: &Path,
+    session_id: &str,
+    transcript_path: &Path,
+) -> Option<u64> {
     use crate::observer::{apply, contract, tail};
 
     let project_dir_str = project_dir.to_string_lossy().to_string();
@@ -465,15 +491,18 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
 
     // THROTTLE: coalesce rapid Stop-hook triggers into one run. If the last observer
     // run for this session was less than `min_interval_secs` ago, skip this pass
-    // entirely WITHOUT advancing the watermark or saving any state — the new turns
-    // stay unconsumed and are picked up by the next trigger after the cooldown.
+    // WITHOUT advancing the watermark or saving any state, and return the REMAINING
+    // cooldown — the caller then schedules a deferred re-run after it elapses (so the
+    // delta never has to wait for the user's next turn).
     // (First run: last_run_at == 0 → far in the past → not throttled.)
     // Floor the EFFECTIVE cooldown so a 0/misconfig can't disable throttling entirely
     // (the config value itself stays untouched — only this skip-check is clamped).
     let cooldown = cfg.min_interval_secs.max(MIN_INTERVAL_FLOOR_SECS);
-    if now_secs().saturating_sub(state.last_run_at) < cooldown {
-        eprintln!("[daemon] throttled (cooldown) — skipping pass for {session_id}");
-        return;
+    let since_last = now_secs().saturating_sub(state.last_run_at);
+    if since_last < cooldown {
+        let remaining = cooldown - since_last;
+        eprintln!("[daemon] throttled (cooldown, {remaining}s left) — deferring pass for {session_id}");
+        return Some(remaining);
     }
 
     // Read the transcript + tail new lines since the watermark, reconciling for
@@ -482,7 +511,7 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
         Ok(b) => b,
         Err(e) => {
             eprintln!("[daemon] read transcript failed for {session_id}: {e}");
-            return;
+            return None;
         }
     };
     let current_stem = transcript_path
@@ -499,7 +528,7 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
     let (raw_lines, new_watermark) = tail::new_lines(&buf, watermark);
     if raw_lines.is_empty() {
         persist_trigger_state(&kdir, session_id, &current_stem, new_watermark, &state, None);
-        return;
+        return None;
     }
 
     // Injected additionalContext is NOT persisted to the transcript, so there is nothing
@@ -513,13 +542,13 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
         .collect();
     if lines.is_empty() {
         persist_trigger_state(&kdir, session_id, &current_stem, new_watermark, &state, None);
-        return;
+        return None;
     }
 
     let delta_turns = crate::observer::format_turns(&lines);
     if delta_turns.trim().is_empty() {
         persist_trigger_state(&kdir, session_id, &current_stem, new_watermark, &state, None);
-        return;
+        return None;
     }
 
     // CIRCUIT BREAKER: hard cap on paid observer-agent spawns per project. If too many
@@ -536,7 +565,9 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
         );
         eprintln!("[daemon] {reason}");
         crate::store::observer_stats::set_paused(&kdir, &reason);
-        return; // do NOT spawn; watermark NOT advanced (turns coalesce into a later pass)
+        // Do NOT spawn and do NOT defer (deferring would spin against the breaker);
+        // watermark NOT advanced — turns coalesce into a later pass once it clears.
+        return None;
     }
 
     let dag_excerpt = crate::observer::dag_excerpt(&kdir, DAG_EXCERPT_LIMIT);
@@ -622,7 +653,7 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
                     turn_count,
                 );
             }
-            return;
+            return None;
         }
     };
 
@@ -652,6 +683,7 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
 
     // TODO Schritt 6: emit change event to subscribers (the GUI consumes the
     // change-event stream then). No push here yet.
+    None
 }
 
 /// Persist state when nothing was extracted this pass (no observer run): advance the
@@ -1101,6 +1133,32 @@ mod tests {
     }
 
     // ---------------- port-file round-trip ----------------
+
+    #[test]
+    fn trigger_pass_returns_remaining_cooldown_when_throttled() {
+        // A project dir whose kdir holds a state with last_run_at = now → the pass
+        // must NOT run and must return the remaining cooldown for the deferred re-run.
+        let project = std::env::temp_dir().join(format!("observer-defer-{}", uuid::Uuid::new_v4()));
+        let kdir = project.join(".claude").join("knowledge");
+        std::fs::create_dir_all(&kdir).unwrap();
+        let state = ObserverState {
+            last_run_at: now_secs(),
+            ..Default::default()
+        };
+        observer_state::save(&kdir, "sess-defer", &state).unwrap();
+
+        let r = run_trigger_pass(&project, "sess-defer", &project.join("missing.jsonl"));
+        let remaining = r.expect("throttled pass must return Some(remaining)");
+        assert!(remaining > 0 && remaining <= 60, "remaining={remaining}");
+
+        // Not throttled (last_run_at=0) + unreadable transcript → plain None (no defer).
+        observer_state::save(&kdir, "sess-defer", &ObserverState::default()).unwrap();
+        assert_eq!(
+            run_trigger_pass(&project, "sess-defer", &project.join("missing.jsonl")),
+            None
+        );
+        std::fs::remove_dir_all(&project).ok();
+    }
 
     #[test]
     fn port_file_roundtrip_is_identical() {
