@@ -215,9 +215,15 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join(file), body).unwrap();
         // `scan_documents` builds ids relative to scan_dir.parent() (the project
-        // root). With the default `.claude/knowledge`, scan_dir = `<dir>/.claude`
-        // and its parent is `<dir>`, so the id is ".claude/<rel_dir>/<file>".
-        format!(".claude/{rel_dir}/{file}")
+        // root). Derive the id from the RESOLVED scan_dir (env-agnostic: an ambient
+        // OBSERVER_KNOWLEDGE_DIR — e.g. inside an Enclade-spawned terminal — moves
+        // the store, and the id must follow).
+        let scan_rel = scan_dir(dir)
+            .strip_prefix(dir)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        format!("{scan_rel}/{rel_dir}/{file}")
     }
 
     #[test]

@@ -550,6 +550,9 @@ pub(crate) fn run_trigger_pass(
         persist_trigger_state(&kdir, session_id, &current_stem, new_watermark, &state, None);
         return None;
     }
+    // Cap the delta so a huge unprocessed backlog can never blow the model context
+    // (tail kept — newest turns matter most).
+    let delta_turns = cap_delta_tail(&delta_turns, cfg.max_delta_bytes.max(10_000));
 
     // CIRCUIT BREAKER: hard cap on paid observer-agent spawns per project. If too many
     // runs happened in the recent window, REFUSE to spawn and mark the store paused
@@ -621,14 +624,26 @@ pub(crate) fn run_trigger_pass(
             eprintln!("[daemon] observer extraction failed for {session_id}: {e}");
             // A failed `claude` call still consumed subscription usage → record it.
             crate::store::observer_stats::record_run(&kdir, 0, false, cfg.min_interval_secs);
+            // Context overflow ("Prompt is too long"): the observer CONVERSATION
+            // itself has grown past the model context (observed live: a 9 MB observer
+            // transcript) — resuming it again can only fail the same way. Drop the
+            // conversation (empty sid → next attempt is a fresh Create with the
+            // capped delta + DAG excerpt). The rolling summary is kept.
+            let overflow = is_context_overflow(&e);
+            let retry_sid = if overflow {
+                eprintln!("[daemon] context overflow — dropping observer conversation {observer_sid} (fresh create next)");
+                String::new()
+            } else {
+                observer_sid.clone()
+            };
             const MAX_EXTRACTION_ATTEMPTS: u32 = 3;
             if state.fail_count + 1 < MAX_EXTRACTION_ATTEMPTS {
                 let next = ObserverState {
                     jsonl_stem: state.jsonl_stem.clone(),
                     watermark: state.watermark,
                     rolling_summary: state.rolling_summary.clone(),
-                    observer_sid: observer_sid.clone(),
-                    turn_count,
+                    observer_sid: retry_sid,
+                    turn_count: if overflow { 0 } else { turn_count },
                     // Stamp the run — the throttle window applies to failed runs too.
                     last_run_at: now_secs(),
                     fail_count: state.fail_count + 1,
@@ -649,8 +664,8 @@ pub(crate) fn run_trigger_pass(
                     &current_stem,
                     new_watermark,
                     &state.rolling_summary,
-                    &observer_sid,
-                    turn_count,
+                    &retry_sid,
+                    if overflow { 0 } else { turn_count },
                 );
             }
             return None;
@@ -684,6 +699,35 @@ pub(crate) fn run_trigger_pass(
     // TODO Schritt 6: emit change event to subscribers (the GUI consumes the
     // change-event stream then). No push here yet.
     None
+}
+
+/// Cap a formatted delta to its TAIL `max_bytes` (newest turns matter most). Cuts on a
+/// line boundary (a partial first line would be noise) and prepends a truncation note
+/// so the model knows earlier material was dropped. `<= max_bytes` → returned as-is.
+fn cap_delta_tail(delta: &str, max_bytes: usize) -> String {
+    if delta.len() <= max_bytes {
+        return delta.to_string();
+    }
+    let start = delta.len() - max_bytes;
+    // Align to the next line start at/after `start` (also lands on a char boundary).
+    let aligned = delta[start..]
+        .find('\n')
+        .map(|nl| start + nl + 1)
+        .unwrap_or(start);
+    let dropped = aligned;
+    format!(
+        "[delta truncated: dropped the oldest {dropped} of {total} bytes — earlier turns not shown]\n{tail}",
+        total = delta.len(),
+        tail = &delta[aligned..],
+    )
+}
+
+/// Whether an extraction error indicates the model CONTEXT overflowed (the CLI's
+/// synthetic "Prompt is too long" answer). Matched loosely on the error string the
+/// runner assembles (which embeds stdout/stderr).
+fn is_context_overflow(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("prompt is too long") || e.contains("context_length") || e.contains("context length")
 }
 
 /// Persist state when nothing was extracted this pass (no observer run): advance the
@@ -1135,11 +1179,36 @@ mod tests {
     // ---------------- port-file round-trip ----------------
 
     #[test]
+    fn cap_delta_tail_keeps_tail_and_notes_truncation() {
+        // Under the cap → unchanged.
+        assert_eq!(cap_delta_tail("short", 100), "short");
+        // Over the cap → tail kept, aligned to a line start, note prepended.
+        let delta = "OLD LINE 1\nOLD LINE 2\nNEW LINE A\nNEW LINE B\n";
+        let capped = cap_delta_tail(delta, 24);
+        assert!(capped.starts_with("[delta truncated:"), "{capped}");
+        assert!(capped.contains("NEW LINE A\nNEW LINE B\n"), "{capped}");
+        assert!(!capped.contains("OLD LINE 1"), "{capped}");
+        // No partial line leaks in.
+        assert!(!capped.contains("INE 2"), "{capped}");
+    }
+
+    #[test]
+    fn context_overflow_is_detected() {
+        assert!(is_context_overflow(
+            "claude exited with failure (code Some(1)); stderr: ; stdout: Prompt is too long"
+        ));
+        assert!(is_context_overflow("API error: context_length_exceeded"));
+        assert!(!is_context_overflow("ephemeral Claude timed out"));
+        assert!(!is_context_overflow("spawn claude: not found"));
+    }
+
+    #[test]
     fn trigger_pass_returns_remaining_cooldown_when_throttled() {
         // A project dir whose kdir holds a state with last_run_at = now → the pass
         // must NOT run and must return the remaining cooldown for the deferred re-run.
+        // kdir resolved via Config (env-agnostic: ambient OBSERVER_KNOWLEDGE_DIR moves it).
         let project = std::env::temp_dir().join(format!("observer-defer-{}", uuid::Uuid::new_v4()));
-        let kdir = project.join(".claude").join("knowledge");
+        let kdir = Config::resolve(&project).knowledge_dir_abs(&project);
         std::fs::create_dir_all(&kdir).unwrap();
         let state = ObserverState {
             last_run_at: now_secs(),
@@ -1521,11 +1590,18 @@ mod tests {
 
     #[test]
     fn knowledge_dir_for_default_is_claude_knowledge() {
-        // With no per-project config file, the default knowledge dir is
-        // `<project>/.claude/knowledge`.
+        // `knowledge_dir_for` must delegate to the Config resolution (env-agnostic
+        // assertion — an ambient OBSERVER_KNOWLEDGE_DIR moves the resolved dir).
         let project = tmp_knowledge_dir();
         let kd = knowledge_dir_for(&project);
-        assert_eq!(kd, project.join(".claude").join("knowledge"));
+        let expected = Config::resolve(&project).knowledge_dir_abs(&project);
+        assert_eq!(kd, expected);
+        // In a CLEAN environment the default is `<project>/.claude/knowledge`.
+        if std::env::var_os("OBSERVER_KNOWLEDGE_DIR").is_none()
+            && std::env::var_os("CLAUDE_PLUGIN_OPTION_knowledge_dir").is_none()
+        {
+            assert_eq!(kd, project.join(".claude").join("knowledge"));
+        }
         std::fs::remove_dir_all(&project).ok();
     }
 }

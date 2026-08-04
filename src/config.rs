@@ -37,6 +37,12 @@ pub struct Config {
     /// minutes on a cold CLI under load (observed live), so this is generous by
     /// default. Floored to 30s at the use site.
     pub obs_timeout_secs: u64,
+    /// Cap (bytes) on the per-run transcript delta fed to the observer. A session with
+    /// a huge unprocessed backlog (observed live: a 15 MB long-running transcript)
+    /// would otherwise blow the model's context ("Prompt is too long") on the first
+    /// pass. The TAIL of the delta is kept (newest turns matter most); a truncation
+    /// note tells the model material was dropped. Floored to 10_000 at the use site.
+    pub max_delta_bytes: usize,
     pub max_decisions: usize,
     pub max_questions: usize,
     /// Circuit-breaker: max observer-agent runs allowed within `breaker_window_secs`
@@ -67,6 +73,7 @@ impl Default for Config {
             min_interval_secs: 45,
             obs_max_turns: 30,
             obs_timeout_secs: 300,
+            max_delta_bytes: 150_000,
             max_decisions: 15,
             max_questions: 15,
             breaker_max: 25,
@@ -89,6 +96,7 @@ struct PartialConfig {
     min_interval_secs: Option<u64>,
     obs_max_turns: Option<u32>,
     obs_timeout_secs: Option<u64>,
+    max_delta_bytes: Option<usize>,
     max_decisions: Option<usize>,
     max_questions: Option<usize>,
     breaker_max: Option<usize>,
@@ -166,6 +174,9 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
     if let Some(v) = get_env("OBS_TIMEOUT_SECS").and_then(|s| s.parse().ok()) {
         cfg.obs_timeout_secs = v;
     }
+    if let Some(v) = get_env("MAX_DELTA_BYTES").and_then(|s| s.parse().ok()) {
+        cfg.max_delta_bytes = v;
+    }
     if let Some(v) = get_env("MAX_DECISIONS").and_then(|s| s.parse().ok()) {
         cfg.max_decisions = v;
     }
@@ -212,6 +223,9 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
             }
             if let Some(v) = p.obs_timeout_secs {
                 cfg.obs_timeout_secs = v;
+            }
+            if let Some(v) = p.max_delta_bytes {
+                cfg.max_delta_bytes = v;
             }
             if let Some(v) = p.max_decisions {
                 cfg.max_decisions = v;
