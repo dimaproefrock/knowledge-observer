@@ -41,7 +41,7 @@ use serde_json::{json, Value};
 
 use crate::config::Config;
 use crate::ipc::{IpcRequest, IpcResponse};
-use crate::observer::agent::{self, OBS_TIMEOUT};
+use crate::observer::agent;
 use crate::store::observer_state::{self, ObserverState};
 
 /// Idle-shutdown default window (seconds). The per-project `Config::idle_daemon_secs`
@@ -568,30 +568,60 @@ pub(crate) fn run_trigger_pass(project_dir: &Path, session_id: &str, transcript_
         }
     };
 
-    // Run the observer agent. On error: log, persist the advanced watermark AND the
-    // observer_sid/turn_count we just set (so a Create/Reseed sticks), and return.
+    // Per-turn timeout from config (floored — a sub-30s cap would kill every real run).
+    let obs_timeout = std::time::Duration::from_secs(cfg.obs_timeout_secs.max(30));
+
+    // Run the observer agent. On error: log + record the run (it cost usage), then
+    // RETRY-or-ADVANCE: below the retry cap keep the OLD watermark so the next trigger
+    // re-attempts the same delta (a timeout must not silently drop the user's turns —
+    // observed live: a >120s haiku create-turn was killed and the extracted decision
+    // was lost); at the cap advance past the delta to cut losses. The observer_sid/
+    // turn_count just set are persisted either way (a Create/Reseed sticks).
     let stdout = match agent::run_extraction(
         &project_dir_str,
         &observer_sid,
         is_first,
         &input,
         cfg.model.as_deref(),
-        OBS_TIMEOUT,
+        obs_timeout,
     ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[daemon] observer extraction failed for {session_id}: {e}");
             // A failed `claude` call still consumed subscription usage → record it.
             crate::store::observer_stats::record_run(&kdir, 0, false, cfg.min_interval_secs);
-            persist_advanced_state(
-                &kdir,
-                session_id,
-                &current_stem,
-                new_watermark,
-                &state.rolling_summary,
-                &observer_sid,
-                turn_count,
-            );
+            const MAX_EXTRACTION_ATTEMPTS: u32 = 3;
+            if state.fail_count + 1 < MAX_EXTRACTION_ATTEMPTS {
+                let next = ObserverState {
+                    jsonl_stem: state.jsonl_stem.clone(),
+                    watermark: state.watermark,
+                    rolling_summary: state.rolling_summary.clone(),
+                    observer_sid: observer_sid.clone(),
+                    turn_count,
+                    // Stamp the run — the throttle window applies to failed runs too.
+                    last_run_at: now_secs(),
+                    fail_count: state.fail_count + 1,
+                };
+                if let Err(e) = observer_state::save(&kdir, session_id, &next) {
+                    eprintln!("[daemon] persist state failed for {session_id}: {e}");
+                }
+                eprintln!(
+                    "[daemon] will retry this delta on the next trigger (attempt {}/{})",
+                    state.fail_count + 1,
+                    MAX_EXTRACTION_ATTEMPTS
+                );
+            } else {
+                eprintln!("[daemon] giving up on this delta after {MAX_EXTRACTION_ATTEMPTS} attempts — advancing watermark");
+                persist_advanced_state(
+                    &kdir,
+                    session_id,
+                    &current_stem,
+                    new_watermark,
+                    &state.rolling_summary,
+                    &observer_sid,
+                    turn_count,
+                );
+            }
             return;
         }
     };
@@ -641,8 +671,9 @@ fn persist_trigger_state(
         rolling_summary: prev.rolling_summary.clone(),
         observer_sid: prev.observer_sid.clone(),
         turn_count: prev.turn_count,
-        // No observer run happened on this no-new-turns path → carry the prior value.
+        // No observer run happened on this no-new-turns path → carry the prior values.
         last_run_at: prev.last_run_at,
+        fail_count: prev.fail_count,
     };
     if let Err(e) = observer_state::save(knowledge_dir, session_id, &next) {
         eprintln!("[daemon] persist state failed for {session_id}: {e}");
@@ -670,6 +701,8 @@ fn persist_advanced_state(
         // This is only called after a real observer-agent run → stamp it now so the
         // next trigger's throttle window starts from here.
         last_run_at: now_secs(),
+        // Fully-advanced state means this delta is settled (success or give-up).
+        fail_count: 0,
     };
     if let Err(e) = observer_state::save(knowledge_dir, session_id, &next) {
         eprintln!("[daemon] persist state failed for {session_id}: {e}");

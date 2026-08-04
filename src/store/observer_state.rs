@@ -38,6 +38,12 @@ pub struct ObserverState {
     /// state files (without this field) loadable as 0 (→ never throttled first run).
     #[serde(default)]
     pub last_run_at: u64,
+    /// Consecutive FAILED extraction runs for the current delta. While below the
+    /// retry cap the daemon keeps the old watermark so the delta is re-attempted by
+    /// the next trigger (a timeout must not silently drop the user's turns); at the
+    /// cap it advances past the delta to cut losses. Reset to 0 on success.
+    #[serde(default)]
+    pub fail_count: u32,
 }
 
 fn state_dir(knowledge_dir: &Path) -> PathBuf {
@@ -89,6 +95,7 @@ mod tests {
             observer_sid: "obs-sid-42".to_string(),
             turn_count: 7,
             last_run_at: 1_700_000_123,
+            fail_count: 1,
         };
 
         save(&dir, "session-1", &state).unwrap();

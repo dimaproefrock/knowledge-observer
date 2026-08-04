@@ -32,6 +32,11 @@ pub struct Config {
     /// triggers within this window are coalesced into the next pass after the cooldown.
     pub min_interval_secs: u64,
     pub obs_max_turns: u32,
+    /// Per-turn timeout (seconds) for the observer-agent `claude` call. A big first
+    /// (create) turn — full extraction prompt + DAG excerpt + delta — can exceed 2
+    /// minutes on a cold CLI under load (observed live), so this is generous by
+    /// default. Floored to 30s at the use site.
+    pub obs_timeout_secs: u64,
     pub max_decisions: usize,
     pub max_questions: usize,
     /// Circuit-breaker: max observer-agent runs allowed within `breaker_window_secs`
@@ -61,6 +66,7 @@ impl Default for Config {
             idle_daemon_secs: 600,
             min_interval_secs: 45,
             obs_max_turns: 30,
+            obs_timeout_secs: 300,
             max_decisions: 15,
             max_questions: 15,
             breaker_max: 25,
@@ -82,6 +88,7 @@ struct PartialConfig {
     idle_daemon_secs: Option<u64>,
     min_interval_secs: Option<u64>,
     obs_max_turns: Option<u32>,
+    obs_timeout_secs: Option<u64>,
     max_decisions: Option<usize>,
     max_questions: Option<usize>,
     breaker_max: Option<usize>,
@@ -156,6 +163,9 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
     if let Some(v) = get_env("OBS_MAX_TURNS").and_then(|s| s.parse().ok()) {
         cfg.obs_max_turns = v;
     }
+    if let Some(v) = get_env("OBS_TIMEOUT_SECS").and_then(|s| s.parse().ok()) {
+        cfg.obs_timeout_secs = v;
+    }
     if let Some(v) = get_env("MAX_DECISIONS").and_then(|s| s.parse().ok()) {
         cfg.max_decisions = v;
     }
@@ -199,6 +209,9 @@ fn resolve_layered(get_env: &dyn Fn(&str) -> Option<String>, file_json: Option<&
             }
             if let Some(v) = p.obs_max_turns {
                 cfg.obs_max_turns = v;
+            }
+            if let Some(v) = p.obs_timeout_secs {
+                cfg.obs_timeout_secs = v;
             }
             if let Some(v) = p.max_decisions {
                 cfg.max_decisions = v;
