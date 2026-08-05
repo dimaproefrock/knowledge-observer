@@ -5,6 +5,7 @@
 //! `nodes/`, `edges.json`, `fragen.json`, `quellen.json`, `observer-state/`, and
 //! `observer-hints/`. The caller resolves the directory.
 
+pub mod hook_trace;
 pub mod knowledge_store;
 pub mod migrate;
 pub mod observer_hint;

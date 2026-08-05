@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::config::Config;
+use crate::store::hook_trace;
 use crate::store::knowledge_store::{self, KnowledgeGraph, NodeType};
 
 // ===================== hook stdin / resolution =====================
@@ -92,8 +93,19 @@ fn resolve_project_dir(input: &HookInput) -> PathBuf {
         .cwd
         .as_ref()
         .filter(|s| !s.trim().is_empty())
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("CLAUDE_PROJECT_DIR").ok().filter(|s| !s.trim().is_empty()))
+        .map(PathBuf::from)
+        .unwrap_or_else(project_dir_from_env)
+}
+
+/// Resolve the project dir **without touching stdin**: `CLAUDE_PROJECT_DIR` →
+/// `OBSERVER_PROJECT_DIR` → process cwd.
+///
+/// Used by the pre-guard hook trace in `main`, which runs before the handler and must
+/// NOT consume the stdin payload the handler still needs.
+pub(crate) fn project_dir_from_env() -> PathBuf {
+    std::env::var("CLAUDE_PROJECT_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
         .or_else(|| std::env::var("OBSERVER_PROJECT_DIR").ok().filter(|s| !s.trim().is_empty()))
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
@@ -337,7 +349,15 @@ pub fn run_index() {
     let project_dir = resolve_project_dir(&input);
     let cfg = Config::resolve(&project_dir);
     let kdir = cfg.knowledge_dir_abs(&project_dir);
-    if let Some(s) = build_index_envelope(&kdir, &cfg) {
+    let envelope = build_index_envelope(&kdir, &cfg);
+    crate::store::hook_trace::record(
+        &kdir,
+        "knowledge-index",
+        &resolve_session_id(&input),
+        false,
+        if envelope.is_some() { hook_trace::outcome::DELIVERED } else { hook_trace::outcome::EMPTY },
+    );
+    if let Some(s) = envelope {
         println!("{s}");
     }
 }
@@ -349,7 +369,15 @@ pub fn run_hint() {
     let cfg = Config::resolve(&project_dir);
     let kdir = cfg.knowledge_dir_abs(&project_dir);
     let session_id = resolve_session_id(&input);
-    if let Some(s) = build_hint_envelope(&kdir, &session_id, &cfg) {
+    let envelope = build_hint_envelope(&kdir, &session_id, &cfg);
+    crate::store::hook_trace::record(
+        &kdir,
+        "knowledge-hint",
+        &session_id,
+        false,
+        if envelope.is_some() { hook_trace::outcome::DELIVERED } else { hook_trace::outcome::EMPTY },
+    );
+    if let Some(s) = envelope {
         println!("{s}");
     }
 }

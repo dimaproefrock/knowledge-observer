@@ -636,43 +636,52 @@ pub(crate) fn run_trigger_pass(
             } else {
                 observer_sid.clone()
             };
-            const MAX_EXTRACTION_ATTEMPTS: u32 = 3;
-            if state.fail_count + 1 < MAX_EXTRACTION_ATTEMPTS {
-                let next = ObserverState {
-                    jsonl_stem: state.jsonl_stem.clone(),
-                    watermark: state.watermark,
-                    rolling_summary: state.rolling_summary.clone(),
-                    observer_sid: retry_sid,
-                    turn_count: if overflow { 0 } else { turn_count },
-                    // Stamp the run — the throttle window applies to failed runs too.
-                    last_run_at: now_secs(),
-                    fail_count: state.fail_count + 1,
-                };
-                if let Err(e) = observer_state::save(&kdir, session_id, &next) {
-                    eprintln!("[daemon] persist state failed for {session_id}: {e}");
-                }
-                eprintln!(
-                    "[daemon] will retry this delta on the next trigger (attempt {}/{})",
-                    state.fail_count + 1,
-                    MAX_EXTRACTION_ATTEMPTS
-                );
-            } else {
-                eprintln!("[daemon] giving up on this delta after {MAX_EXTRACTION_ATTEMPTS} attempts — advancing watermark");
-                persist_advanced_state(
-                    &kdir,
-                    session_id,
-                    &current_stem,
-                    new_watermark,
-                    &state.rolling_summary,
-                    &retry_sid,
-                    if overflow { 0 } else { turn_count },
-                );
-            }
+            retry_or_advance(
+                &kdir,
+                session_id,
+                &state,
+                &current_stem,
+                new_watermark,
+                &retry_sid,
+                if overflow { 0 } else { turn_count },
+                "observer extraction failed",
+            );
             return None;
         }
     };
 
-    let result = contract::parse(&stdout);
+    // A response we cannot parse is a FAILED pass, not an empty one. The tolerant
+    // `contract::parse` used to collapse both into `ExtractionResult::default()`, so the
+    // code below recorded a success and advanced the watermark past turns that were never
+    // extracted — the delta was then unrecoverable. (Observed 2026-08-04: a single
+    // mismatched quote cost a whole session's knowledge.)
+    let result = match contract::parse_checked(&stdout) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[daemon] unparseable observer response for {session_id}: {e}");
+            crate::store::observer_stats::record_run(&kdir, 0, false, cfg.min_interval_secs);
+            save_failed_response(&kdir, session_id, &stdout, &e);
+            // Prose instead of JSON means the agent drifted out of its extraction role;
+            // resuming that same conversation would drift again. Drop it so the retry is
+            // a fresh Create — which re-sends the extraction contract AND the delta.
+            let retry_sid = match e {
+                contract::ParseError::NoJson => String::new(),
+                contract::ParseError::Invalid(_) => observer_sid.clone(),
+            };
+            let retry_turns = if retry_sid.is_empty() { 0 } else { turn_count };
+            retry_or_advance(
+                &kdir,
+                session_id,
+                &state,
+                &current_stem,
+                new_watermark,
+                &retry_sid,
+                retry_turns,
+                "unparseable observer response",
+            );
+            return None;
+        }
+    };
     let applied = apply::apply_ops_store(&project_dir_str, session_id, &result);
     crate::store::observer_stats::record_run(&kdir, applied as i64, true, cfg.min_interval_secs);
     eprintln!("[daemon] applied {applied} op(s) for session {session_id}");
@@ -753,6 +762,112 @@ fn persist_trigger_state(
     };
     if let Err(e) = observer_state::save(knowledge_dir, session_id, &next) {
         eprintln!("[daemon] persist state failed for {session_id}: {e}");
+    }
+}
+
+/// Attempts spent on ONE delta before it is abandoned — covers a failed agent call
+/// (timeout / overflow) AND an unparseable response.
+const MAX_EXTRACTION_ATTEMPTS: u32 = 3;
+
+/// How many unparseable responses to keep on disk for forensics.
+const MAX_FAILED_DUMPS: usize = 20;
+
+/// RETRY-or-ADVANCE bookkeeping for a pass that produced no usable result.
+///
+/// Below the attempt cap: keep the OLD watermark so the next trigger re-attempts the
+/// SAME delta — the user's turns must never be dropped just because one pass failed.
+/// At the cap: advance past the delta to cut losses, and say so loudly.
+///
+/// `retry_sid` empty ⇒ the observer conversation is dropped (next attempt is a fresh
+/// Create); `turn_count` should then be 0.
+#[allow(clippy::too_many_arguments)]
+fn retry_or_advance(
+    knowledge_dir: &Path,
+    session_id: &str,
+    state: &ObserverState,
+    stem: &str,
+    new_watermark: u64,
+    retry_sid: &str,
+    turn_count: u32,
+    reason: &str,
+) {
+    if state.fail_count + 1 < MAX_EXTRACTION_ATTEMPTS {
+        let next = ObserverState {
+            jsonl_stem: state.jsonl_stem.clone(),
+            // NOT advanced — this is the whole point: the delta survives for a retry.
+            watermark: state.watermark,
+            rolling_summary: state.rolling_summary.clone(),
+            observer_sid: retry_sid.to_string(),
+            turn_count,
+            // Stamp the run — the throttle window applies to failed runs too.
+            last_run_at: now_secs(),
+            fail_count: state.fail_count + 1,
+        };
+        if let Err(e) = observer_state::save(knowledge_dir, session_id, &next) {
+            eprintln!("[daemon] persist state failed for {session_id}: {e}");
+        }
+        eprintln!(
+            "[daemon] {reason} — will retry this delta on the next trigger (attempt {}/{})",
+            state.fail_count + 1,
+            MAX_EXTRACTION_ATTEMPTS
+        );
+    } else {
+        eprintln!(
+            "[daemon] {reason} — giving up on this delta after {MAX_EXTRACTION_ATTEMPTS} attempts, advancing watermark"
+        );
+        persist_advanced_state(
+            knowledge_dir,
+            session_id,
+            stem,
+            new_watermark,
+            &state.rolling_summary,
+            retry_sid,
+            turn_count,
+        );
+    }
+}
+
+/// Dump an unparseable observer response to `<knowledge_dir>/failed/<ts>-<session>.txt`
+/// so the extracted content can still be recovered by hand (the ops are usually intact —
+/// only the JSON around them is broken). Ring-limited, best-effort.
+fn save_failed_response(
+    knowledge_dir: &Path,
+    session_id: &str,
+    stdout: &str,
+    err: &crate::observer::contract::ParseError,
+) {
+    let dir = knowledge_dir.join("failed");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    // Unix seconds, not RFC3339 — a colon is not a legal filename character on Windows.
+    let safe: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(40)
+        .collect();
+    let name = format!("{}-{}.txt", now_secs(), if safe.is_empty() { "unknown" } else { &safe });
+    let body = format!("# {err}\n# session: {session_id}\n\n{stdout}");
+    if std::fs::write(dir.join(name), body).is_err() {
+        return;
+    }
+
+    // Ring-limit: drop the oldest dumps beyond the cap (names are ts-prefixed, so a
+    // lexicographic sort is chronological for the next ~250 years).
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    if files.len() <= MAX_FAILED_DUMPS {
+        return;
+    }
+    files.sort();
+    for old in &files[..files.len() - MAX_FAILED_DUMPS] {
+        std::fs::remove_file(old).ok();
     }
 }
 
@@ -1129,30 +1244,39 @@ fn resolve_trigger_project_dir(input: &TriggerInput) -> PathBuf {
 /// daemon, and fires a fire-and-forget `trigger` IPC. **Always exits 0**; never
 /// hangs, never panics. The actual extraction runs in the daemon's background.
 pub fn run_trigger_subcommand() {
+    use crate::store::hook_trace::{self, outcome};
+
     let input = read_trigger_input();
 
-    // No transcript → nothing to extract.
-    let transcript_path = match input.transcript_path.clone() {
-        Some(t) => t,
-        None => return,
-    };
-
+    // Resolve session/project FIRST so every early return below can still be traced —
+    // the Stop hook is async, so a silent return is otherwise invisible everywhere.
     let session_id =
         resolve_trigger_session_id(&input, std::env::var("OBSERVER_SESSION_ID").ok().as_deref());
     let project_dir = resolve_trigger_project_dir(&input);
     let knowledge_dir = knowledge_dir_for(&project_dir);
+    let trace = |o: &str| hook_trace::record(&knowledge_dir, "observer-trigger", &session_id, false, o);
+
+    // No transcript → nothing to extract.
+    let transcript_path = match input.transcript_path.clone() {
+        Some(t) => t,
+        None => {
+            trace(outcome::NO_TRANSCRIPT);
+            return;
+        }
+    };
 
     let (port, token) = match ensure_daemon(&project_dir, &knowledge_dir) {
         Some(pt) => pt,
         None => {
             eprintln!("[observer] observer-trigger: daemon autostart failed — skipping");
+            trace(outcome::AUTOSTART_FAILED);
             return;
         }
     };
 
     // Fire-and-forget: the daemon runs the pass on a background thread (the Stop
     // hook is async), so we just deliver the trigger and exit. Any IPC error logs.
-    if let Err(e) = crate::ipc::call(
+    match crate::ipc::call(
         port,
         &token,
         "",
@@ -1160,7 +1284,11 @@ pub fn run_trigger_subcommand() {
         json!({ "session_id": session_id, "transcript_path": transcript_path }),
         &session_id,
     ) {
-        eprintln!("[observer] observer-trigger: IPC failed: {e}");
+        Ok(_) => trace(outcome::DELIVERED),
+        Err(e) => {
+            eprintln!("[observer] observer-trigger: IPC failed: {e}");
+            trace(outcome::IPC_ERROR);
+        }
     }
 }
 
@@ -1174,6 +1302,86 @@ mod tests {
         let d = std::env::temp_dir().join(format!("observer-daemon-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    // ---------------- B1: a failed pass must not eat the delta ----------------
+
+    fn state_with(watermark: u64, fail_count: u32) -> ObserverState {
+        ObserverState {
+            jsonl_stem: "stem".into(),
+            watermark,
+            rolling_summary: "laufende Zusammenfassung".into(),
+            observer_sid: "sid-1".into(),
+            turn_count: 2,
+            last_run_at: 0,
+            fail_count,
+        }
+    }
+
+    #[test]
+    fn retry_below_the_cap_keeps_the_watermark_so_the_delta_survives() {
+        let kdir = tmp_knowledge_dir();
+        let state = state_with(100, 0);
+        observer_state::save(&kdir, "s1", &state).unwrap();
+
+        retry_or_advance(&kdir, "s1", &state, "stem", 999, "sid-1", 2, "test");
+
+        let got = observer_state::load(&kdir, "s1");
+        assert_eq!(got.watermark, 100, "watermark must NOT advance past an unextracted delta");
+        assert_eq!(got.fail_count, 1, "attempt counted");
+        assert_eq!(got.rolling_summary, "laufende Zusammenfassung", "summary preserved");
+        std::fs::remove_dir_all(&kdir).ok();
+    }
+
+    #[test]
+    fn at_the_cap_the_delta_is_abandoned_and_the_watermark_advances() {
+        let kdir = tmp_knowledge_dir();
+        let state = state_with(100, MAX_EXTRACTION_ATTEMPTS - 1);
+        observer_state::save(&kdir, "s1", &state).unwrap();
+
+        retry_or_advance(&kdir, "s1", &state, "stem", 999, "sid-1", 2, "test");
+
+        let got = observer_state::load(&kdir, "s1");
+        assert_eq!(got.watermark, 999, "at the cap we cut losses");
+        assert_eq!(got.fail_count, 0, "settled");
+        std::fs::remove_dir_all(&kdir).ok();
+    }
+
+    #[test]
+    fn dropped_conversation_resets_turn_count_for_a_fresh_create() {
+        let kdir = tmp_knowledge_dir();
+        let state = state_with(100, 0);
+        observer_state::save(&kdir, "s1", &state).unwrap();
+
+        // Empty retry_sid = drop the drifted conversation.
+        retry_or_advance(&kdir, "s1", &state, "stem", 999, "", 0, "prose");
+
+        let got = observer_state::load(&kdir, "s1");
+        assert!(got.observer_sid.is_empty(), "conversation dropped");
+        assert_eq!(got.turn_count, 0, "next pass is a fresh Create");
+        assert_eq!(got.watermark, 100, "delta still survives");
+        std::fs::remove_dir_all(&kdir).ok();
+    }
+
+    #[test]
+    fn failed_responses_are_dumped_and_ring_limited() {
+        use crate::observer::contract::ParseError;
+        let kdir = tmp_knowledge_dir();
+
+        save_failed_response(&kdir, "sess-a", "kaputt {", &ParseError::Invalid("boom".into()));
+        let dir = kdir.join("failed");
+        let first: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(first.len(), 1);
+        let body = std::fs::read_to_string(first[0].path()).unwrap();
+        assert!(body.contains("kaputt {"), "raw response preserved for hand-recovery");
+        assert!(body.contains("sess-a"), "session recorded");
+
+        for i in 0..(MAX_FAILED_DUMPS + 5) {
+            save_failed_response(&kdir, &format!("s{i:03}"), "x", &ParseError::NoJson);
+        }
+        let n = std::fs::read_dir(&dir).unwrap().flatten().count();
+        assert!(n <= MAX_FAILED_DUMPS, "ring not enforced: {n} dumps");
+        std::fs::remove_dir_all(&kdir).ok();
     }
 
     // ---------------- port-file round-trip ----------------

@@ -176,15 +176,60 @@ fn strip_code_fences(s: &str) -> String {
     trimmed.to_string()
 }
 
-/// Parse the observer's stdout into an [`ExtractionResult`].
+/// Why an observer response could not be turned into an [`ExtractionResult`].
 ///
-/// Robust against chatter and one malformed op: returns `ExtractionResult::default()`
-/// on any unrecoverable failure (no JSON / undeserializable outer object). NEVER panics.
-pub fn parse(stdout: &str) -> ExtractionResult {
+/// The two cases are worth distinguishing when reading logs: `NoJson` means the agent
+/// answered in prose — it drifted out of its extraction role; `Invalid` means it meant
+/// to emit ops but produced broken JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    /// No JSON object in the response at all (pure prose — a drifted agent).
+    NoJson,
+    /// A JSON object was found but does not parse. Observed live (2026-08-04): the model
+    /// opened a German quote `„` and closed it with a straight ASCII `"`, which
+    /// terminated the JSON string early and cost the whole extraction.
+    Invalid(String),
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::NoJson => {
+                write!(f, "no JSON object in the response (agent answered in prose?)")
+            }
+            ParseError::Invalid(e) => write!(f, "malformed JSON: {e}"),
+        }
+    }
+}
+
+/// Parse the observer's stdout into an [`ExtractionResult`], reporting failure.
+///
+/// Robust against chatter (prose / ```json fences) and against a single malformed op
+/// poisoning the whole array — those are still tolerated. What is NOT tolerated is a
+/// response that yields no usable object at all: that returns `Err` so the caller can
+/// treat the pass as failed and RETRY the delta instead of dropping it. NEVER panics.
+pub fn parse_checked(stdout: &str) -> Result<ExtractionResult, ParseError> {
     let unfenced = strip_code_fences(stdout);
     let json = match extract_json_object(&unfenced) {
         Some(j) => j,
-        None => return ExtractionResult::default(),
+        None => {
+            // No BALANCED object — but that does NOT imply "no JSON attempted". An
+            // unbalanced quote flips the scanner's string parity, which hides every
+            // following brace from it (exactly the 2026-08-04 smart-quote case). Retry
+            // on the widest `{…}` span so serde can name the real syntax error; a dump
+            // saying "expected `,` or `}` at column 84" is recoverable by hand, a bare
+            // "no JSON" is not.
+            return Err(match (unfenced.find('{'), unfenced.rfind('}')) {
+                (Some(a), Some(b)) if b > a => ParseError::Invalid(
+                    serde_json::from_str::<serde_json::Value>(&unfenced[a..=b])
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "unbalanced JSON object".to_string()),
+                ),
+                // Genuinely no object anywhere → the agent answered in prose.
+                _ => ParseError::NoJson,
+            });
+        }
     };
 
     // Parse the outer object loosely so one bad op can't poison the whole array.
@@ -198,10 +243,8 @@ pub fn parse(stdout: &str) -> ExtractionResult {
         hint: String,
     }
 
-    let raw: Raw = match serde_json::from_str(json) {
-        Ok(r) => r,
-        Err(_) => return ExtractionResult::default(),
-    };
+    let raw: Raw =
+        serde_json::from_str(json).map_err(|e| ParseError::Invalid(e.to_string()))?;
 
     let ops = raw
         .ops
@@ -209,11 +252,23 @@ pub fn parse(stdout: &str) -> ExtractionResult {
         .filter_map(|v| serde_json::from_value::<Op>(v).ok())
         .collect();
 
-    ExtractionResult {
+    Ok(ExtractionResult {
         ops,
         rolling_summary: raw.rolling_summary,
         hint: raw.hint,
-    }
+    })
+}
+
+/// Tolerant wrapper around [`parse_checked`]: collapses a parse failure to an empty
+/// result.
+///
+/// **Do not use this on the extraction path.** An empty result there is
+/// indistinguishable from "the agent found nothing durable", so the caller records a
+/// success and advances the watermark — silently burning the user's turns. That bug
+/// cost a full session's knowledge on 2026-08-04. Use [`parse_checked`] and handle the
+/// error. This wrapper remains for probes/tests where a failure genuinely does not matter.
+pub fn parse(stdout: &str) -> ExtractionResult {
+    parse_checked(stdout).unwrap_or_default()
 }
 
 /// The extraction prompt handed to the headless observer LLM (Slice A, Schritt 7).
@@ -257,6 +312,64 @@ If there is nothing durable to capture, return an empty 'ops' list (or a single 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------- parse_checked: failure must be reportable (B1) ----------------
+
+    #[test]
+    fn malformed_json_is_an_error_not_an_empty_result() {
+        // The live 2026-08-04 failure: a German opening quote „ closed with a straight
+        // ASCII quote terminates the JSON string early and cost a whole extraction.
+        let broken = "{\"ops\":[{\"action\":\"add\",\"typ\":\"decision\",\
+            \"inhalt\":\"Feature \u{201e}Session verschieben\" wird geplant\",\
+            \"begruendung\":\"x\"}],\"rolling_summary\":\"s\"}";
+        // NOTE: the mismatched quote flips string parity, so the balanced-object scanner
+        // finds nothing — the widest-span fallback is what turns this into a *named*
+        // syntax error rather than a useless "no JSON".
+        let got = parse_checked(broken);
+        assert!(
+            matches!(&got, Err(ParseError::Invalid(msg)) if msg.contains("expected")),
+            "malformed JSON must surface as a NAMED syntax error, got {got:?}"
+        );
+        // The tolerant wrapper still collapses it — which is precisely why the
+        // extraction path must not use it.
+        assert!(parse(broken).ops.is_empty());
+    }
+
+    #[test]
+    fn prose_without_json_is_reported_as_no_json() {
+        // A drifted agent answering the conversation instead of extracting.
+        let prose = "Das ist ein Bug in der Move-Implementierung. Implementiere ich eben.";
+        assert!(matches!(parse_checked(prose), Err(ParseError::NoJson)));
+    }
+
+    #[test]
+    fn valid_json_with_zero_ops_stays_a_success() {
+        // The legitimate "nothing durable here" case must NOT look like a failure.
+        let r = parse_checked(r#"{"ops":[],"rolling_summary":"nichts Neues"}"#)
+            .expect("empty-but-valid must parse");
+        assert!(r.ops.is_empty());
+        assert_eq!(r.rolling_summary, "nichts Neues");
+    }
+
+    #[test]
+    fn per_op_tolerance_is_unchanged_within_valid_json() {
+        // Unchanged by B1: an unknown `action` degrades to Noop (`#[serde(other)]`) and
+        // an op with missing required fields is dropped — neither fails the pass.
+        let s = r#"{"ops":[
+            {"action":"add","typ":"fact","inhalt":"gilt","begruendung":"weil"},
+            {"action":"nonsense"},
+            {"action":"add","typ":"fact"}
+        ],"rolling_summary":"x"}"#;
+        let r = parse_checked(s).expect("valid outer JSON");
+        assert_eq!(r.ops.len(), 2, "add + noop kept, incomplete add dropped");
+        assert!(matches!(r.ops[1], Op::Noop), "unknown action degrades to Noop");
+    }
+
+    #[test]
+    fn fenced_json_still_parses() {
+        let s = "```json\n{\"ops\":[],\"rolling_summary\":\"f\"}\n```";
+        assert_eq!(parse_checked(s).expect("fenced").rolling_summary, "f");
+    }
 
     #[test]
     fn parse_add_with_links() {

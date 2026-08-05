@@ -35,10 +35,19 @@ fn main() {
     // loop, each pass a full subscription `claude` call (burns the usage limit fast).
     // The daemon spawns the agent with KNOWLEDGE_OBSERVER_INTERNAL=1; the agent's hook
     // subprocesses inherit it, so every hook bails here and the loop can never start.
-    if hook_should_bail(
-        std::env::var_os("KNOWLEDGE_OBSERVER_INTERNAL").is_some(),
-        sub.as_deref(),
-    ) {
+    let internal = std::env::var_os("KNOWLEDGE_OBSERVER_INTERNAL").is_some();
+    if hook_should_bail(internal, sub.as_deref()) {
+        // Trace the bail too: this is the ONE branch that otherwise leaves no evidence
+        // anywhere (the Stop hook is async, so stderr is discarded by the host). Without
+        // it, "hook never fired" and "hook fired and bailed" look identical on disk.
+        // Resolved from the env only — reading stdin here would consume the payload the
+        // handler needs.
+        if let Some(s) = sub.as_deref() {
+            let project_dir = cli::project_dir_from_env();
+            let kdir = config::Config::resolve(&project_dir).knowledge_dir_abs(&project_dir);
+            let session = std::env::var("OBSERVER_SESSION_ID").unwrap_or_default();
+            store::hook_trace::record(&kdir, s, &session, true, store::hook_trace::outcome::BAILED);
+        }
         return;
     }
 
