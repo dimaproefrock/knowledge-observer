@@ -65,12 +65,18 @@ impl Default for Config {
             // transparent. Turn off per-project via observer.json { "feedback": false }.
             feedback: true,
             knowledge_dir: ".claude/knowledge".to_string(),
-            // Cheap default for a background extractor; users override via
-            // observer.json / OBSERVER_MODEL / CLAUDE_PLUGIN_OPTION_model.
-            // The `claude` CLI accepts the `haiku` alias.
-            model: Some("haiku".to_string()),
+            // Extraction-judgment default: `sonnet` — live comparison showed haiku
+            // silently skipping explicitly stated decisions in meta-heavy sessions,
+            // and the extractor's verdict quality IS the product. Weight-wise sonnet
+            // keeps the background overhead in the single-digit-% range of a typical
+            // Opus-class work session (throttle + breaker + delta cap still bound it).
+            // Downgrade per project via observer.json { "model": "haiku" }.
+            // The `claude` CLI accepts model aliases.
+            model: Some("sonnet".to_string()),
             idle_daemon_secs: 600,
-            min_interval_secs: 45,
+            // 15s (was 45): with the deferred re-run, worst-case node latency is
+            // roughly cooldown + run time — 45s dominated the perceived lag.
+            min_interval_secs: 15,
             obs_max_turns: 30,
             obs_timeout_secs: 300,
             max_delta_bytes: 150_000,
@@ -284,8 +290,10 @@ mod tests {
         assert_eq!(cfg, Config::default());
         assert!(cfg.feedback, "user-visible feedback is ON by default");
         assert!(!Path::new(&cfg.knowledge_dir).is_absolute(), "default is relative");
-        // Cheap model by default for the background extractor.
-        assert_eq!(cfg.model.as_deref(), Some("haiku"), "default model is the cheap haiku alias");
+        // Judgment-quality default for the background extractor (haiku missed
+        // explicitly stated decisions in live use; downgrade per project if desired).
+        assert_eq!(cfg.model.as_deref(), Some("sonnet"), "default model is the sonnet alias");
+        assert_eq!(cfg.min_interval_secs, 15, "default cooldown is 15s (deferred re-run bounds worst-case latency)");
         // Circuit-breaker defaults: 25 runs per 600s window.
         assert_eq!(cfg.breaker_max, 25, "default circuit-breaker cap is 25 runs");
         assert_eq!(cfg.breaker_window_secs, 600, "default breaker window is 600s");
