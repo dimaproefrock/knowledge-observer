@@ -1131,6 +1131,11 @@ fn spawn_detached_daemon(project_dir: &Path) -> Option<()> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // The daemon is per project, not per session — it must not carry the session identity of
+    // whichever session happened to autostart it (see `ephemeral::HOST_SESSION_ENV`).
+    for k in crate::ephemeral::HOST_SESSION_ENV {
+        cmd.env_remove(k);
+    }
 
     detach(&mut cmd);
 

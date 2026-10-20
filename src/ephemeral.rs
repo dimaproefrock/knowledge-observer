@@ -49,6 +49,10 @@ fn apply_npm_path(cmd: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn apply_npm_path(_cmd: &mut Command) {}
 
+/// Session-identity variables of host tools that wrap Claude Code. Stripped from every
+/// spawned process so the observer never runs "as" the session it observes.
+pub(crate) const HOST_SESSION_ENV: &[&str] = &["ENCLADE_SESSION_ID"];
+
 /// Build the base `claude` `Command` shared by every headless runner: `cmd /C claude` on
 /// Windows (npm shim), piped stdin/stdout/stderr, cwd, the nested-session env scrubbed, the
 /// extra args + env applied, and the npm PATH fix. The CALLER appends the auth/permission flags
@@ -76,6 +80,14 @@ fn base_claude_command(
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT")
         .env_remove("CLAUDE_CODE_SESSION");
+    // Never pass a host tool's session identity on to the observer's own claude. The daemon
+    // descends from the observed session's process and inherits its env; a host that stamps
+    // transcript ownership from such a variable (Enclade: `ENCLADE_SESSION_ID` → SessionStart
+    // hook `enclade-marker:`) would otherwise attribute the OBSERVER's transcript to the
+    // observed session — its context meter then flips to the observer's conversation.
+    for k in HOST_SESSION_ENV {
+        cmd.env_remove(k);
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -188,4 +200,23 @@ fn pump_and_collect(
         ));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The observer's own claude must not inherit a host session identity, or the host
+    /// attributes the observer transcript to the observed session (Enclade, 2026-08 + 2026-10).
+    #[test]
+    fn base_command_strips_host_session_identity() {
+        let cmd = base_claude_command("C:/x", &[], &[]);
+        for k in HOST_SESSION_ENV {
+            assert!(
+                cmd.get_envs().any(|(key, v)| key == *k && v.is_none()),
+                "{k} must be explicitly removed, got envs: {:?}",
+                cmd.get_envs().collect::<Vec<_>>()
+            );
+        }
+    }
 }
