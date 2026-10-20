@@ -23,7 +23,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: observer-linux-x64
-          - os: macos-13
+          # Intel macOS is cross-compiled on an arm64 runner: the macos-13 (Intel) image
+          # is retired and its job just sits queued until it is cancelled.
+          - os: macos-14
             target: x86_64-apple-darwin
             asset: observer-macos-x64
           - os: macos-14
