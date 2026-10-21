@@ -25,6 +25,42 @@ pub struct RunRec {
     pub ok: bool,
 }
 
+/// Applied store ops by kind (curation ratio: does the observer refine/replace, or only add?).
+/// Links created inline with an ADD count under their polarity too.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct OpCounts {
+    pub add: u64,
+    pub update: u64,
+    /// UPDATEs that retired a node (`ueberholt=true`).
+    pub retire: u64,
+    /// UPDATEs that marked a decision carried out (`erledigt=true`).
+    pub done: u64,
+    pub link_supports: u64,
+    pub link_contradicts: u64,
+    pub link_replaces: u64,
+}
+
+impl OpCounts {
+    fn accumulate(&mut self, o: &OpCounts) {
+        self.add += o.add;
+        self.update += o.update;
+        self.retire += o.retire;
+        self.done += o.done;
+        self.link_supports += o.link_supports;
+        self.link_contradicts += o.link_contradicts;
+        self.link_replaces += o.link_replaces;
+    }
+
+    /// Count one link by its polarity (German canonical + English codes).
+    pub fn count_link(&mut self, polaritaet: &str) {
+        match polaritaet {
+            "replaces" | "ersetzt" => self.link_replaces += 1,
+            "contradicts" | "widerspricht" => self.link_contradicts += 1,
+            _ => self.link_supports += 1,
+        }
+    }
+}
+
 /// The flat, consumer-facing stats document persisted to `observer-stats.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObserverStats {
@@ -48,6 +84,9 @@ pub struct ObserverStats {
     /// Consumed by the host status bar alongside `paused`.
     #[serde(default)]
     pub paused_reason: String,
+    /// Cumulative applied ops by kind since counting began (2026-10-20).
+    #[serde(default)]
+    pub ops_by_kind: OpCounts,
     pub recent: Vec<RunRec>,
 }
 
@@ -66,6 +105,7 @@ impl Default for ObserverStats {
             updated_at: 0,
             paused: false,
             paused_reason: String::new(),
+            ops_by_kind: OpCounts::default(),
             recent: Vec::new(),
         }
     }
@@ -112,8 +152,14 @@ fn load(knowledge_dir: &Path) -> ObserverStats {
 /// never propagates. Increments `total_runs`, appends a `RunRec`, prunes `recent` to the
 /// last 24h, recomputes the rolling windows, and writes atomically (temp + rename).
 pub fn record_run(knowledge_dir: &Path, ops: i64, ok: bool, min_interval_secs: u64) {
+    record_run_counted(knowledge_dir, ops, ok, min_interval_secs, &OpCounts::default());
+}
+
+/// `record_run` that also adds the run's applied ops by kind to `ops_by_kind`.
+pub fn record_run_counted(knowledge_dir: &Path, ops: i64, ok: bool, min_interval_secs: u64, kinds: &OpCounts) {
     let now = now_secs();
     let mut stats = load(knowledge_dir);
+    stats.ops_by_kind.accumulate(kinds);
 
     stats.total_runs += 1;
     stats.recent.push(RunRec { at: now, ops, ok });
@@ -301,6 +347,18 @@ mod tests {
         std::fs::remove_dir_all(&empty).ok();
         assert_eq!(count_in_window(&empty, 10 * 60), 0);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn record_run_counted_accumulates_op_kinds() {
+        let dir = temp_dir();
+        let run = OpCounts { add: 2, link_replaces: 1, ..Default::default() };
+        record_run_counted(&dir, 3, true, 45, &run);
+        record_run_counted(&dir, 3, true, 45, &run);
+        record_run(&dir, 0, false, 45);
+        let s = load(&dir);
+        assert_eq!(s.ops_by_kind, OpCounts { add: 4, link_replaces: 2, ..Default::default() });
+        assert_eq!(s.total_runs, 3);
     }
 
     #[test]

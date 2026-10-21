@@ -140,19 +140,19 @@ fn extract_text(v: &serde_json::Value) -> String {
     }
 }
 
-/// A compact, line-per-node excerpt of the top-N scored nodes (id · typ · status ·
-/// titel · [tags]) for dedup context. Reads + scores the graph from disk. `kdir` is
-/// the knowledge dir directly (holds `nodes/`).
-pub(crate) fn dag_excerpt(kdir: &Path, limit: usize) -> String {
-    use crate::store::knowledge_store::{self as ks, QueryFilter};
-    let full = ks::query(kdir);
-    let filter = QueryFilter {
-        limit: Some(limit),
-        ..Default::default()
-    };
-    let view = ks::apply_filter(&full, &filter);
+/// How many of this session's own newest nodes always go into the excerpt.
+const EXCERPT_OWN_SESSION: usize = 10;
+
+/// A compact, line-per-node excerpt (id · typ · status · titel · [tags]) for dedup
+/// context. Reads + scores the graph from disk. `kdir` is the knowledge dir directly
+/// (holds `nodes/`). Selection is TOPICAL, not by global score — in a large store the
+/// observer must see the existing node it should UPDATE/replace, or it can only ADD:
+/// this session's newest nodes, then the nodes matching `context` (delta + rolling
+/// summary), then newest as filler. Superseded/retired nodes are left out.
+pub(crate) fn dag_excerpt(kdir: &Path, limit: usize, context: &str, session_id: &str) -> String {
+    let full = crate::store::knowledge_store::query(kdir);
     let mut out = String::new();
-    for n in &view.nodes {
+    for n in select_excerpt(&full, limit, context, session_id) {
         let titel: String = if n.inhalt.chars().count() > 100 {
             n.inhalt.chars().take(100).collect::<String>() + "…"
         } else {
@@ -165,6 +165,83 @@ pub(crate) fn dag_excerpt(kdir: &Path, limit: usize) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Lowercased word tokens (≥ 4 chars) for the topical match.
+fn tokens(text: &str) -> std::collections::HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .filter(|t| t.chars().count() >= 4)
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+/// Pure selection behind `dag_excerpt`. Relevance = Σ idf of the context terms a node
+/// contains (inhalt + tags), so frequent words weigh ~nothing without a stopword list.
+fn select_excerpt<'a>(g: &'a KnowledgeGraph, limit: usize, context: &str, session_id: &str) -> Vec<&'a Node> {
+    let live: Vec<&Node> = g
+        .nodes
+        .iter()
+        .filter(|n| n.status != "superseded" && !n.ueberholt)
+        .collect();
+    let mut picked: Vec<&Node> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut take = |n: &'a Node, picked: &mut Vec<&'a Node>| {
+        if picked.len() < limit && seen.insert(n.id.as_str()) {
+            picked.push(n);
+        }
+    };
+
+    // 1. This session's own newest nodes (`load` sorts ascending by datum).
+    if !session_id.is_empty() {
+        for n in live
+            .iter()
+            .rev()
+            .filter(|n| n.session_id.as_deref() == Some(session_id))
+            .take(EXCERPT_OWN_SESSION)
+        {
+            take(n, &mut picked);
+        }
+    }
+
+    // 2. Topical match against the context.
+    let ctx = tokens(context);
+    let node_toks: Vec<std::collections::HashSet<String>> = live
+        .iter()
+        .map(|n| tokens(&format!("{} {}", n.inhalt, n.tags.join(" "))))
+        .collect();
+    let mut df: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for toks in &node_toks {
+        for t in toks {
+            if ctx.contains(t) {
+                *df.entry(t.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+    let total = live.len().max(1) as f64;
+    let mut scored: Vec<(f64, usize)> = node_toks
+        .iter()
+        .enumerate()
+        .map(|(i, toks)| {
+            let s: f64 = toks
+                .iter()
+                .filter_map(|t| df.get(t.as_str()))
+                .map(|&d| (total / d as f64).ln())
+                .sum();
+            (s, i)
+        })
+        .filter(|(s, _)| *s > 0.0)
+        .collect();
+    // Ties → newer first (higher index = newer).
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(b.1.cmp(&a.1)));
+    for (_, i) in scored {
+        take(live[i], &mut picked);
+    }
+
+    // 3. Filler: newest nodes.
+    for n in live.iter().rev() {
+        take(n, &mut picked);
+    }
+    picked
 }
 
 /// Short label for a node type in the excerpt (Debug-format, lowercased).
@@ -203,6 +280,33 @@ mod tests {
             nodes,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn excerpt_prefers_own_session_then_topic_and_skips_superseded() {
+        let mut old = node("old", "superseded", "2026-01-01", None, "Pathfinding über Diffusion");
+        old.ueberholt = true;
+        let g = graph_of(vec![
+            old,
+            node("topic", "active", "2026-01-02", None, "Pathfinding über Dijkstra im Voxelgitter"),
+            node("noise", "active", "2026-01-03", None, "Buildserver nutzt Docker"),
+            node("own", "active", "2026-01-04", Some("s1"), "Etwas ganz anderes"),
+        ]);
+        let ids: Vec<&str> = select_excerpt(&g, 2, "wie läuft das pathfinding im voxelgitter", "s1")
+            .iter()
+            .map(|n| n.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["own", "topic"]);
+    }
+
+    #[test]
+    fn excerpt_falls_back_to_newest_without_topic_match() {
+        let g = graph_of(vec![
+            node("a", "active", "2026-01-01", None, "Alpha"),
+            node("b", "active", "2026-01-02", None, "Beta"),
+        ]);
+        let ids: Vec<&str> = select_excerpt(&g, 1, "nichts passt", "").iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["b"]);
     }
 
     #[test]

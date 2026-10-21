@@ -59,7 +59,7 @@ const CONN_READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// between accept attempts to keep the idle-shutdown clock responsive.
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Top-N DAG nodes handed to the observer as dedup context.
+/// Max DAG nodes handed to the observer as dedup context (topical, see `dag_excerpt`).
 const DAG_EXCERPT_LIMIT: usize = 40;
 
 /// Floor (seconds) applied to the EFFECTIVE per-session cooldown in the throttle
@@ -573,7 +573,9 @@ pub(crate) fn run_trigger_pass(
         return None;
     }
 
-    let dag_excerpt = crate::observer::dag_excerpt(&kdir, DAG_EXCERPT_LIMIT);
+    let excerpt_context = format!("{}\n{}", state.rolling_summary, delta_turns);
+    let dag_excerpt =
+        crate::observer::dag_excerpt(&kdir, DAG_EXCERPT_LIMIT, &excerpt_context, session_id);
 
     // Decide create/resume/reseed and build the matching observer-agent input.
     let mode = decide_turn_mode(&state, cfg.obs_max_turns);
@@ -682,8 +684,8 @@ pub(crate) fn run_trigger_pass(
             return None;
         }
     };
-    let applied = apply::apply_ops_store(&project_dir_str, session_id, &result);
-    crate::store::observer_stats::record_run(&kdir, applied as i64, true, cfg.min_interval_secs);
+    let (applied, kinds) = apply::apply_ops_store_counted(&project_dir_str, session_id, &result);
+    crate::store::observer_stats::record_run_counted(&kdir, applied as i64, true, cfg.min_interval_secs, &kinds);
     eprintln!("[daemon] applied {applied} op(s) for session {session_id}");
 
     // Persist state: keep the new rolling_summary if the extractor produced one.

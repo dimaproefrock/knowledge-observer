@@ -178,9 +178,12 @@ fn build_index_text(
     max_decisions: usize,
     max_questions: usize,
 ) -> Option<(String, usize, usize)> {
+    // Newest first: `load` sorts ascending by datum, so a plain `take` would always
+    // inject the OLDEST active decisions (stale, off-topic for current work).
     let decisions: Vec<&str> = g
         .nodes
         .iter()
+        .rev()
         .filter(|n| matches!(n.typ, NodeType::Decision) && n.status == "active")
         .map(|n| n.inhalt.as_str())
         .take(max_decisions)
@@ -492,6 +495,20 @@ mod tests {
         // Empty graph → no active decision and no open question → text None.
         let g = KnowledgeGraph::default();
         assert!(build_index_text(&g, 15, 15).is_none());
+    }
+
+    #[test]
+    fn index_text_lists_newest_active_decisions() {
+        let dir = fresh_kdir("idx-newest");
+        for inhalt in ["Erste", "Zweite", "Dritte"] {
+            knowledge_store::add_node(&dir, NodeType::Decision, inhalt.into(), "damit", None, "session").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let g = knowledge_store::query(&dir);
+        let (text, _, _) = build_index_text(&g, 2, 0).unwrap();
+        assert!(text.contains("Dritte") && text.contains("Zweite"));
+        assert!(!text.contains("Erste"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---------------- hint ----------------

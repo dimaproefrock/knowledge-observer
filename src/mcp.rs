@@ -243,7 +243,7 @@ fn handle_tools_call(id: Value, params: Option<&Value>) -> String {
         }
     };
 
-    dispatch_op(id, op, args)
+    dispatch_op(id, name, op, args)
 }
 
 /// Build an `IpcRequest` for the given op + args and execute it directly in-process
@@ -252,7 +252,8 @@ fn handle_tools_call(id: Value, params: Option<&Value>) -> String {
 /// pretty text content; a store failure maps to `isError: true` (a tool error, not
 /// a protocol error). The project dir comes from the environment; `session_id` is
 /// irrelevant for reads (provenance only applies to writes) so it stays empty.
-fn dispatch_op(id: Value, op: &str, args: Value) -> String {
+/// Every real read (not the health ping) is also logged to `store::read_log`.
+fn dispatch_op(id: Value, tool: &str, op: &str, args: Value) -> String {
     let req = IpcRequest {
         token: String::new(),
         project_dir: resolve_project_dir(),
@@ -261,6 +262,17 @@ fn dispatch_op(id: Value, op: &str, args: Value) -> String {
         session_id: String::new(),
     };
     let (resp, _changed) = crate::dispatch::dispatch_store(&req);
+    if op != "ping" {
+        let project = std::path::Path::new(&req.project_dir);
+        let kdir = crate::config::Config::resolve(project).knowledge_dir_abs(project);
+        let returned = resp
+            .data
+            .get("nodes")
+            .or_else(|| resp.data.get("active_decisions"))
+            .and_then(Value::as_array)
+            .map(Vec::len);
+        crate::store::read_log::record(&kdir, tool, &req.payload, returned);
+    }
     if resp.ok {
         let text = serde_json::to_string_pretty(&resp.data).unwrap_or_default();
         result_response(

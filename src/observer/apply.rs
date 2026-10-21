@@ -20,6 +20,7 @@ use serde_json::json;
 use crate::dispatch;
 use crate::ipc::IpcRequest;
 use crate::observer::contract::{ExtractionResult, Op};
+use crate::store::observer_stats::OpCounts;
 
 /// Build an [`IpcRequest`] for a given store op + payload. `session_id` is set on
 /// every request so `dispatch_store` stamps the recording node's origin.
@@ -40,11 +41,21 @@ fn ipc(project_dir: &str, session_id: &str, op: &str, payload: serde_json::Value
 /// an `Add` with an empty `begruendung` is dropped before dispatch (dispatch would
 /// reject it anyway — we skip cleanly so it never counts as a mutation).
 pub fn apply_ops_store(project_dir: &str, session_id: &str, result: &ExtractionResult) -> usize {
+    apply_ops_store_counted(project_dir, session_id, result).0
+}
+
+/// `apply_ops_store` that also returns the mutating ops by kind (for `observer-stats`).
+pub fn apply_ops_store_counted(
+    project_dir: &str,
+    session_id: &str,
+    result: &ExtractionResult,
+) -> (usize, OpCounts) {
     use crate::config::Config;
     use crate::store::knowledge_store;
     use std::path::Path;
 
     let mut mutated = 0usize;
+    let mut kinds = OpCounts::default();
 
     // Document ids the LLM is allowed to cite. Any `quellen` id NOT in this set is
     // a hallucination/stale path → dropped (so a node never cites an unresolvable id).
@@ -142,6 +153,19 @@ pub fn apply_ops_store(project_dir: &str, session_id: &str, result: &ExtractionR
         let (resp, changed) = dispatch::dispatch_store(&req);
         if changed {
             mutated += 1;
+            match op {
+                Op::Add { links, .. } => {
+                    kinds.add += 1;
+                    links.iter().for_each(|l| kinds.count_link(&l.polaritaet));
+                }
+                Op::Update { fields, .. } => {
+                    kinds.update += 1;
+                    kinds.retire += u64::from(fields.ueberholt == Some(true));
+                    kinds.done += u64::from(fields.erledigt == Some(true));
+                }
+                Op::Link { polaritaet, .. } => kinds.count_link(polaritaet),
+                Op::Noop => {}
+            }
         } else if !resp.ok {
             eprintln!(
                 "[observer] op '{}' did not mutate: {}",
@@ -151,7 +175,7 @@ pub fn apply_ops_store(project_dir: &str, session_id: &str, result: &ExtractionR
         }
     }
 
-    mutated
+    (mutated, kinds)
 }
 
 /// Keep only the ids present in `known`, preserving order. Hallucinated/stale
@@ -306,8 +330,9 @@ mod tests {
             rolling_summary: String::new(),
             hint: String::new(),
         };
-        let mutated = apply_ops_store(&proj, "sess-3", &link);
+        let (mutated, kinds) = apply_ops_store_counted(&proj, "sess-3", &link);
         assert_eq!(mutated, 1);
+        assert_eq!(kinds, OpCounts { link_supports: 1, ..Default::default() });
 
         let g = ks::query(&kdir(&dir));
         assert_eq!(g.edges.len(), 1, "expected one edge between the two nodes");
