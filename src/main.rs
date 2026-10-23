@@ -9,12 +9,16 @@
 //! - `observer-daemon` / `daemon` — the per-project single-writer daemon serve loop.
 //! - `mcp-serve` — read-only MCP stdio server: lets the work agent actively pull
 //!   knowledge (query/get/current/list_documents) within a session.
+//! - `curate` — human curation (edit/delete nodes, add/delete edges, scan documents):
+//!   one JSON request on stdin, forwarded to the daemon (the single writer).
 //!
-//! Each handler resolves its own project dir (hook-stdin cwd / `CLAUDE_PROJECT_DIR` /
-//! `OBSERVER_PROJECT_DIR` / cwd) and the knowledge dir via `Config`.
+//! Each handler resolves its own project dir (`CLAUDE_PROJECT_DIR` /
+//! `OBSERVER_PROJECT_DIR` / hook-stdin cwd / cwd — see `cli::resolve_project_dir_with`)
+//! and the knowledge dir via `Config`.
 
 mod cli;
 mod config;
+mod curate;
 mod dispatch;
 mod ephemeral;
 mod error;
@@ -57,6 +61,7 @@ fn main() {
         Some("observer-trigger") => observer::daemon::run_trigger_subcommand(),
         Some("observer-daemon") | Some("daemon") => observer::daemon::serve(),
         Some("mcp-serve") => crate::mcp::run_mcp_serve(),
+        Some("curate") => crate::curate::run_curate(),
         Some("view") => crate::view::run_view(std::env::args().nth(2)),
         // Hidden: the detached background server spawned by `view`. Not advertised in
         // the usage string. Arg is the resolved absolute project dir.
@@ -64,7 +69,7 @@ fn main() {
         other => {
             eprintln!(
                 "observer {}: unknown/missing subcommand {:?}\n\
-                 usage: observer <knowledge-index|knowledge-hint|observer-trigger|observer-daemon|mcp-serve|view>",
+                 usage: observer <knowledge-index|knowledge-hint|observer-trigger|observer-daemon|mcp-serve|curate|view>",
                 env!("CARGO_PKG_VERSION"),
                 other
             );
@@ -96,7 +101,7 @@ mod tests {
             assert!(hook_should_bail(true, Some(s)), "{s} must bail when internal");
         }
         // non-hooks keep running even inside the agent (none are spawned by it anyway)
-        for s in ["observer-daemon", "daemon", "mcp-serve", "view", "__view-serve"] {
+        for s in ["observer-daemon", "daemon", "mcp-serve", "curate", "view", "__view-serve"] {
             assert!(!hook_should_bail(true, Some(s)), "{s} must not bail");
         }
         // normal sessions (not internal): nothing bails

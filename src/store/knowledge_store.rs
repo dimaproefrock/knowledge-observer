@@ -160,7 +160,7 @@ pub struct Frage {
 /// A document indexed as a citable source (auto-scanned). Lives in a side-list,
 /// NOT in the typed/scored DAG — keeps the concept clean (a document is where
 /// knowledge comes from, not knowledge itself).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Quelle {
     /// Stable id = the relative path (so re-scans dedupe and citations are stable).
     pub id: String,
@@ -1130,12 +1130,17 @@ fn doc_art(folder: &str) -> String {
     .to_string()
 }
 
-/// Replace the persisted document index (called after a scan).
-pub fn set_quellen(knowledge_dir: &Path, quellen: Vec<Quelle>) -> Result<()> {
+/// Replace the persisted document index (called after a scan). Writes ONLY when the
+/// list actually differs from the stored one; returns whether it wrote.
+pub fn set_quellen(knowledge_dir: &Path, quellen: Vec<Quelle>) -> Result<bool> {
     let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut graph = load(knowledge_dir);
+    if graph.quellen == quellen {
+        return Ok(false);
+    }
     graph.quellen = quellen;
-    save(knowledge_dir, &graph)
+    save(knowledge_dir, &graph)?;
+    Ok(true)
 }
 
 /// Resolve a node reference: an exact id, else a UNIQUE case-insensitive substring
@@ -1946,6 +1951,23 @@ mod tests {
         let g = query(&dir);
         assert_eq!(g.quellen.len(), 1);
         assert_eq!(g.quellen[0].titel, "T");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn set_quellen_writes_only_on_change() {
+        let dir = temp_dir();
+        let q = Quelle { id: "a.md".into(), pfad: "a.md".into(), titel: "T".into(), art: "doc".into() };
+        assert!(set_quellen(&dir, vec![q.clone()]).unwrap(), "first set writes");
+        // Plant a marker in quellen.json: an unchanged set must leave the file alone.
+        let path = quellen_path(&dir);
+        let marked = std::fs::read_to_string(&path).unwrap() + "\n";
+        std::fs::write(&path, &marked).unwrap();
+        assert!(!set_quellen(&dir, vec![q.clone()]).unwrap(), "unchanged set is a no-op");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), marked);
+        let q2 = Quelle { titel: "T2".into(), ..q };
+        assert!(set_quellen(&dir, vec![q2]).unwrap(), "changed title writes");
+        assert_eq!(query(&dir).quellen[0].titel, "T2");
         std::fs::remove_dir_all(&dir).ok();
     }
 

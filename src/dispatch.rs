@@ -35,7 +35,12 @@ pub fn dispatch_store(req: &IpcRequest) -> (IpcResponse, bool) {
     // Per-project gate. `ping` stays
     // reachable so callers can health-check even when knowledge is off.
     if !cfg.enabled && req.op != "ping" {
-        return (IpcResponse::err("knowledge is disabled for this project"), false);
+        return (
+            IpcResponse::err(
+                "knowledge is disabled for this project (enabled=false via .claude/observer.json or OBSERVER_ENABLED)",
+            ),
+            false,
+        );
     }
 
     // `ks::query`/`ks::load` already run `migrate_if_needed` internally, so no
@@ -229,10 +234,78 @@ pub fn dispatch_store(req: &IpcRequest) -> (IpcResponse, bool) {
             }
         }
 
+        // Pure read: scan + return. NOT persisted here — `mcp-serve` runs this
+        // in-process (outside the daemon), and a write would make it a second writer.
+        // The document index is persisted only by the daemon (`curate_scan_documents`).
         "list_documents" => {
             let docs = ks::scan_documents(&scan_dir);
-            let _ = ks::set_quellen(&kdir, docs.clone());
             (IpcResponse::ok(json!({ "documents": docs })), false)
+        }
+
+        // ---- Human curation (Enclade's knowledge window, via `observer curate`) ----
+        // Exact semantics of Enclade's former direct store writes: absent field =
+        // unchanged, present field is taken verbatim (`[]` / `""` clear), ids only.
+        "curate_update_node" => {
+            let Some(id) = nonempty(p, "id") else {
+                return (IpcResponse::err("curate_update_node: requires 'id'"), false);
+            };
+            let typ = match p.get("typ").and_then(Value::as_str) {
+                Some(t) => match NodeType::parse(t) {
+                    Some(parsed) => Some(parsed),
+                    None => return (IpcResponse::err(format!("invalid typ: {t}")), false),
+                },
+                None => None,
+            };
+            let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
+            let b = |k: &str| p.get(k).and_then(Value::as_bool);
+            let r = ks::update_node(
+                &kdir,
+                id,
+                s("inhalt"),
+                s("begruendung"),
+                typ,
+                p.get("basis_score").and_then(Value::as_f64),
+                raw_str_array(p, "quelle_ids"),
+                raw_str_array(p, "tags"),
+                b("ueberholt"),
+                b("erledigt"),
+            );
+            store_resp(r.map(|n| json!(n)))
+        }
+
+        "curate_delete_node" => match nonempty(p, "id") {
+            Some(id) => store_resp(ks::delete_node(&kdir, id).map(|_| Value::Null)),
+            None => (IpcResponse::err("curate_delete_node: requires 'id'"), false),
+        },
+
+        "curate_add_edge" => {
+            let (Some(von), Some(zu), Some(pol)) =
+                (nonempty(p, "von"), nonempty(p, "zu"), nonempty(p, "polaritaet"))
+            else {
+                return (
+                    IpcResponse::err("curate_add_edge: requires 'von', 'zu', 'polaritaet'"),
+                    false,
+                );
+            };
+            let gew = p.get("gewicht").and_then(Value::as_f64);
+            store_resp(ks::add_edge(&kdir, von, zu, pol, gew).map(|e| json!(e)))
+        }
+
+        "curate_delete_edge" => match nonempty(p, "edge_id") {
+            Some(id) => store_resp(ks::delete_edge(&kdir, id).map(|_| Value::Null)),
+            None => (IpcResponse::err("curate_delete_edge: requires 'edge_id'"), false),
+        },
+
+        // Scan + persist the document index, writing only when it changed.
+        // `scan_dir` (optional): relative to the project dir or absolute; default
+        // `kdir.parent()` (Enclade passes ".enclade").
+        "curate_scan_documents" => {
+            let dir = nonempty(p, "scan_dir").map_or(scan_dir, |d| project_dir.join(d));
+            let docs = ks::scan_documents(&dir);
+            match ks::set_quellen(&kdir, docs.clone()) {
+                Ok(changed) => (IpcResponse::ok(json!({ "documents": docs, "changed": changed })), changed),
+                Err(e) => (IpcResponse::err(e.to_string()), false),
+            }
         }
 
         // Correct/retire an existing node (Claude fixing its own knowledge).
@@ -413,6 +486,21 @@ fn parse_str_array(p: &Value, key: &str) -> Option<Vec<String>> {
     }
 }
 
+/// A string-array payload field taken verbatim (None if absent; `[]` stays `Some([])`
+/// so curation can clear a list). Non-string elements are ignored.
+fn raw_str_array(p: &Value, key: &str) -> Option<Vec<String>> {
+    let arr = p.get(key)?.as_array()?;
+    Some(arr.iter().filter_map(Value::as_str).map(str::to_string).collect())
+}
+
+/// Map a store result to a response; a success counts as a graph change.
+fn store_resp(r: crate::error::Result<Value>) -> (IpcResponse, bool) {
+    match r {
+        Ok(v) => (IpcResponse::ok(v), true),
+        Err(e) => (IpcResponse::err(e.to_string()), false),
+    }
+}
+
 /// A required string payload field: present and non-empty after trimming, else None.
 fn nonempty<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
     p.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
@@ -512,6 +600,149 @@ mod tests {
         ));
         assert!(!resp.ok && !changed);
         assert!(resp.error.unwrap().contains("begruendung"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Seed a node via the store; returns its id.
+    fn seed(dir: &std::path::Path, typ: NodeType, inhalt: &str) -> String {
+        ks::add_node(&kdir(dir), typ, inhalt.into(), "warum", None, "session").unwrap().id
+    }
+
+    #[test]
+    fn curate_update_node_sets_all_fields_and_clears() {
+        let dir = tmp();
+        let id = seed(&dir, NodeType::Observation, "alt");
+        let (resp, changed) = dispatch_store(&req(
+            &dir,
+            "curate_update_node",
+            json!({ "id": id, "inhalt": "neu", "begruendung": "b", "typ": "erkenntnis",
+                    "basis_score": 0.4, "quelle_ids": ["a.md"], "tags": ["t"],
+                    "ueberholt": true, "erledigt": true }),
+        ));
+        assert!(resp.ok && changed, "{resp:?}");
+        assert_eq!(resp.data["id"], json!(id));
+        let n = ks::query(&kdir(&dir)).nodes.remove(0);
+        assert_eq!((n.inhalt.as_str(), n.begruendung.as_str()), ("neu", "b"));
+        assert_eq!(n.typ, NodeType::Insight); // German input normalized
+        assert_eq!((n.basis_score, n.ueberholt, n.erledigt), (0.4, true, true));
+        assert_eq!((n.quelle_ids, n.tags), (vec!["a.md".to_string()], vec!["t".to_string()]));
+
+        // Absent = unchanged; present `[]` / `""` clear (Enclade semantics).
+        let (resp, _) = dispatch_store(&req(
+            &dir,
+            "curate_update_node",
+            json!({ "id": id, "begruendung": "", "tags": [], "quelle_ids": [] }),
+        ));
+        assert!(resp.ok, "{resp:?}");
+        let n = ks::query(&kdir(&dir)).nodes.remove(0);
+        assert_eq!(n.inhalt, "neu");
+        assert!(n.begruendung.is_empty() && n.tags.is_empty() && n.quelle_ids.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn curate_update_node_rejects_bad_input() {
+        let dir = tmp();
+        let id = seed(&dir, NodeType::Observation, "x");
+        let (resp, changed) =
+            dispatch_store(&req(&dir, "curate_update_node", json!({ "id": id, "typ": "quatsch" })));
+        assert!(!resp.ok && !changed);
+        assert_eq!(resp.error.as_deref(), Some("invalid typ: quatsch"));
+        let (resp, _) = dispatch_store(&req(&dir, "curate_update_node", json!({ "id": "nope" })));
+        assert!(resp.error.unwrap().contains("node not found"));
+        let (resp, _) = dispatch_store(&req(&dir, "curate_update_node", json!({})));
+        assert!(!resp.ok);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn curate_delete_node_removes_node_and_its_edges() {
+        let dir = tmp();
+        let a = seed(&dir, NodeType::Insight, "a");
+        let b = seed(&dir, NodeType::Observation, "b");
+        ks::add_edge(&kdir(&dir), &a, &b, "supports", None).unwrap();
+        let (resp, changed) = dispatch_store(&req(&dir, "curate_delete_node", json!({ "id": b })));
+        assert!(resp.ok && changed && resp.data.is_null(), "{resp:?}");
+        let g = ks::query(&kdir(&dir));
+        assert_eq!(g.nodes.len(), 1);
+        assert!(g.edges.is_empty());
+        assert!(!kdir(&dir).join("nodes").join(format!("{b}.md")).exists());
+        let (resp, _) = dispatch_store(&req(&dir, "curate_delete_node", json!({ "id": b })));
+        assert!(resp.error.unwrap().contains("node not found"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn curate_add_and_delete_edge() {
+        let dir = tmp();
+        let a = seed(&dir, NodeType::Insight, "alpha");
+        let b = seed(&dir, NodeType::Observation, "beta");
+        let (resp, changed) = dispatch_store(&req(
+            &dir,
+            "curate_add_edge",
+            json!({ "von": a, "zu": b, "polaritaet": "widerspricht", "gewicht": 0.5 }),
+        ));
+        assert!(resp.ok && changed, "{resp:?}");
+        assert_eq!(resp.data["polaritaet"], json!("contradicts"));
+        assert_eq!(resp.data["gewicht"], json!(0.5));
+        let edge_id = resp.data["id"].as_str().unwrap().to_string();
+
+        // Ids only — a title fragment must NOT resolve (unlike `link`).
+        let (resp, _) = dispatch_store(&req(
+            &dir,
+            "curate_add_edge",
+            json!({ "von": a, "zu": "beta", "polaritaet": "supports" }),
+        ));
+        assert!(resp.error.unwrap().contains("node not found"));
+        // Cycle is rejected.
+        let (resp, _) =
+            dispatch_store(&req(&dir, "curate_add_edge", json!({ "von": b, "zu": a, "polaritaet": "+" })));
+        assert!(resp.error.unwrap().contains("cycle"));
+
+        let (resp, changed) =
+            dispatch_store(&req(&dir, "curate_delete_edge", json!({ "edge_id": edge_id })));
+        assert!(resp.ok && changed);
+        assert!(ks::query(&kdir(&dir)).edges.is_empty());
+        let (resp, _) = dispatch_store(&req(&dir, "curate_delete_edge", json!({ "edge_id": edge_id })));
+        assert!(resp.error.unwrap().contains("edge not found"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn curate_scan_documents_persists_only_on_change() {
+        let dir = tmp();
+        let docs = dir.join(".enclade").join("features");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("f.md"), "# Feature F").unwrap();
+        let scan = |d: &std::path::Path| {
+            dispatch_store(&req(d, "curate_scan_documents", json!({ "scan_dir": ".enclade" })))
+        };
+        let (resp, changed) = scan(&dir);
+        assert!(resp.ok && changed, "{resp:?}");
+        assert_eq!(resp.data["changed"], json!(true));
+        assert_eq!(resp.data["documents"][0]["id"], json!(".enclade/features/f.md"));
+        assert_eq!(ks::query(&kdir(&dir)).quellen.len(), 1);
+
+        let (resp, changed) = scan(&dir);
+        assert!(resp.ok && !changed);
+        assert_eq!(resp.data["changed"], json!(false));
+
+        std::fs::write(docs.join("g.md"), "# G").unwrap();
+        let (resp, changed) = scan(&dir);
+        assert!(changed && resp.data["documents"].as_array().unwrap().len() == 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn list_documents_does_not_persist() {
+        let dir = tmp();
+        let docs = kdir(&dir).parent().unwrap().join("adr");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("1.md"), "# ADR 1").unwrap();
+        let (resp, changed) = dispatch_store(&req(&dir, "list_documents", json!({})));
+        assert!(resp.ok && !changed);
+        assert_eq!(resp.data["documents"].as_array().unwrap().len(), 1);
+        assert!(!kdir(&dir).join("quellen.json").exists(), "read path must not write");
         std::fs::remove_dir_all(&dir).ok();
     }
 

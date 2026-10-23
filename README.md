@@ -80,6 +80,56 @@ Example `<project>/.claude/observer.json`:
 { "knowledge_dir": "D:/wissen/projectA", "prompt_extra": "Record API contracts verbatim." }
 ```
 
+### Project-dir resolution
+
+Every entry point (hooks, trigger, daemon, MCP server) resolves the project root the same way:
+
+```
+CLAUDE_PROJECT_DIR  >  OBSERVER_PROJECT_DIR  >  hook-stdin cwd (daemon: positional arg)  >  process cwd
+```
+
+The env vars come first on purpose: the hook-stdin `cwd` follows Claude's shell, so after a
+`cd sub` in a Bash call it would otherwise create stray `sub/…/knowledge/` stores. The
+autostarted daemon gets `OBSERVER_PROJECT_DIR` and has an inherited `CLAUDE_PROJECT_DIR`
+removed, so it is always anchored at the project that started it. (`observer view` keeps its
+explicit argument as the highest priority.)
+
+## Curation API (`observer curate`)
+
+For hosts that let a human edit the graph (e.g. Enclade's knowledge window). The write goes
+**through the daemon** (the single writer) — `curate` never touches the store itself; if the
+daemon cannot be started/reached it returns an error.
+
+Pipe **one** JSON object on stdin:
+
+```json
+{ "project_dir": "C:\\path\\to\\project", "op": "curate_update_node", "args": { "id": "…", "tags": [] } }
+```
+
+`curate` resolves the knowledge dir exactly like the other subcommands (`<project>/.claude/observer.json`
+> env > default), autostarts the daemon, forwards the op and prints the daemon's reply on stdout:
+`{"ok":true,"data":…}` or `{"ok":false,"error":"…"}`. Exit code: `0` ok, `1` op/daemon error,
+`2` malformed request (bad JSON, missing `project_dir`, unsupported `op`, non-object `args`).
+
+**Enclade:** set `OBSERVER_KNOWLEDGE_DIR=.enclade/knowledge` on the `curate` process (as for its
+Claude sessions) — otherwise the default `.claude/knowledge` is used and a different store/daemon
+is targeted.
+
+| `op` | `args` | `data` on success |
+|---|---|---|
+| `curate_update_node` | `id` (required); optional `inhalt`, `begruendung`, `typ`, `basis_score`, `quelle_ids[]`, `tags[]`, `ueberholt`, `erledigt` | the updated node |
+| `curate_delete_node` | `id` | `null` (its edges are removed too) |
+| `curate_add_edge` | `von`, `zu` (exact node ids), `polaritaet` (`supports`/`contradicts`/`replaces`, German aliases accepted), optional `gewicht` (default 1.0) | the new edge |
+| `curate_delete_edge` | `edge_id` | `null` |
+| `curate_scan_documents` | optional `scan_dir` (relative to `project_dir` or absolute; default: the knowledge dir's parent) | `{"documents":[…],"changed":bool}` |
+
+Semantics: an absent field stays unchanged; a present one is taken verbatim, so `[]` / `""`
+clear a list / the rationale. `typ` accepts English and German codes. `curate_scan_documents`
+persists `quellen.json` only when the document list actually changed. Errors include
+`node not found: <id>`, `edge not found: <id>`, `invalid typ: <t>`, cycle rejection, and a
+clear message when knowledge is disabled for the project. The read-only MCP tool
+`list_documents` only scans and returns — it never persists.
+
 ## Notes
 
 - **Subscription-based** — drives `claude` under your Pro/Max subscription; no API key is used.
