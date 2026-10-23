@@ -68,16 +68,10 @@ pub fn run_mcp_serve() {
     }
 }
 
-/// Resolve the project dir for a tool call: `CLAUDE_PROJECT_DIR` (native plugin
-/// env) → `OBSERVER_PROJECT_DIR` → the process cwd. Mirrors the hook resolution in
-/// [`crate::cli`] (minus the hook-stdin `cwd`, which MCP has no equivalent for).
+/// Resolve the project dir for a tool call via the shared
+/// [`crate::cli::resolve_project_dir_with`] (MCP has no hook-stdin `cwd`).
 fn resolve_project_dir() -> String {
-    std::env::var("CLAUDE_PROJECT_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("OBSERVER_PROJECT_DIR").ok().filter(|s| !s.trim().is_empty()))
-        .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()))
-        .unwrap_or_else(|| ".".to_string())
+    crate::cli::project_dir_from_env().to_string_lossy().to_string()
 }
 
 /// Dispatch a single JSON-RPC message line. Returns the response line, or `None`

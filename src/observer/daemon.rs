@@ -81,19 +81,13 @@ pub struct PortFile {
 
 // ===================== project-dir + knowledge-dir resolution =====================
 
-/// Resolve the daemon's project dir from the environment, the same way the hooks do
-/// (plugin-aware): `CLAUDE_PROJECT_DIR` (native plugin env) → `OBSERVER_PROJECT_DIR`
-/// → the first non-flag positional CLI arg → the process cwd. The returned dir is
-/// NOT created here.
+/// Resolve the daemon's project dir the same way the hooks do (shared
+/// [`crate::cli::resolve_project_dir_with`]): `CLAUDE_PROJECT_DIR` →
+/// `OBSERVER_PROJECT_DIR` → the first non-flag positional CLI arg → the process cwd.
+/// [`spawn_detached_daemon`] strips `CLAUDE_PROJECT_DIR`, so an autostarted daemon is
+/// anchored by `OBSERVER_PROJECT_DIR`. The returned dir is NOT created here.
 fn resolve_project_dir() -> PathBuf {
-    std::env::var("CLAUDE_PROJECT_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("OBSERVER_PROJECT_DIR").ok().filter(|s| !s.trim().is_empty()))
-        .or_else(positional_project_override)
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::cli::resolve_project_dir_with(positional_project_override().as_deref())
 }
 
 /// Scan the CLI args (skipping the exe + the `observer`/`daemon` subcommand tokens)
@@ -299,7 +293,8 @@ fn now_secs() -> u64 {
 // ===================== request handler =====================
 
 /// Route one authenticated request. `record/update/link/merge/query/get/
-/// current_state/list_documents/add_fact/ping` delegate to the store dispatch
+/// current_state/list_documents/add_fact/ping` and the `curate_*` ops (from
+/// `observer curate`) delegate to the store dispatch
 /// (the daemon is the single writer). New daemon ops are handled here.
 ///
 /// `project_dir` is the daemon's project root (the anchor `dispatch_store` keys off).
@@ -1126,6 +1121,10 @@ fn spawn_detached_daemon(project_dir: &Path) -> Option<()> {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("observer-daemon")
         .env("OBSERVER_PROJECT_DIR", project_dir)
+        // `CLAUDE_PROJECT_DIR` outranks `OBSERVER_PROJECT_DIR` in the daemon's
+        // resolution; an inherited one (e.g. a host launched from a Claude session)
+        // would anchor the daemon at the WRONG project.
+        .env_remove("CLAUDE_PROJECT_DIR")
         // Don't inherit a nested-session marker into the daemon's own env.
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT")
@@ -1230,18 +1229,10 @@ fn resolve_trigger_session_id(input: &TriggerInput, env_session_id: Option<&str>
         .unwrap_or_default()
 }
 
-/// Resolve the project dir for the trigger (plugin-aware): hook-stdin `cwd` →
-/// `CLAUDE_PROJECT_DIR` (plugin env) → `OBSERVER_PROJECT_DIR` → the process cwd.
+/// Resolve the project dir for the trigger via the shared
+/// [`crate::cli::resolve_project_dir_with`] (env first, hook-stdin `cwd` as fallback).
 fn resolve_trigger_project_dir(input: &TriggerInput) -> PathBuf {
-    input
-        .cwd
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("CLAUDE_PROJECT_DIR").ok().filter(|s| !s.trim().is_empty()))
-        .or_else(|| std::env::var("OBSERVER_PROJECT_DIR").ok().filter(|s| !s.trim().is_empty()))
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::cli::resolve_project_dir_with(input.cwd.as_deref())
 }
 
 /// `observer observer-trigger` — the `Stop`-hook entry point.
@@ -1796,12 +1787,10 @@ mod tests {
         assert!(input.transcript_path.is_none(), "no transcript → run_trigger_subcommand exits early");
     }
 
-    #[test]
-    fn trigger_project_dir_prefers_stdin_cwd() {
-        // stdin cwd wins over everything (it is the most specific).
-        let input = TriggerInput { cwd: Some("C:/from-stdin".into()), ..Default::default() };
-        assert_eq!(resolve_trigger_project_dir(&input), PathBuf::from("C:/from-stdin"));
-    }
+    // Trigger project-dir priority (env before stdin cwd) is pinned env-free by
+    // `cli::tests::project_dir_priority_env_before_stdin_cwd` — the trigger only
+    // delegates to `cli::resolve_project_dir_with` (an env-reading test here would
+    // race the mcp tests that set CLAUDE_PROJECT_DIR).
 
     #[test]
     fn knowledge_dir_for_default_is_claude_knowledge() {

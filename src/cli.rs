@@ -85,30 +85,49 @@ fn read_hook_input() -> HookInput {
     }
 }
 
-/// Resolve the project dir for a hook (plugin-aware): hook-stdin `cwd` →
-/// `CLAUDE_PROJECT_DIR` (native plugin env) → `OBSERVER_PROJECT_DIR` → the process
-/// cwd.
+/// Resolve the project dir for a hook from its stdin `cwd` (see
+/// [`resolve_project_dir_with`] for the priority).
 fn resolve_project_dir(input: &HookInput) -> PathBuf {
-    input
-        .cwd
-        .as_ref()
-        .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(project_dir_from_env)
+    resolve_project_dir_with(input.cwd.as_deref())
 }
 
-/// Resolve the project dir **without touching stdin**: `CLAUDE_PROJECT_DIR` →
-/// `OBSERVER_PROJECT_DIR` → process cwd.
+/// Resolve the project dir **without touching stdin** (no fallback value).
 ///
 /// Used by the pre-guard hook trace in `main`, which runs before the handler and must
 /// NOT consume the stdin payload the handler still needs.
 pub(crate) fn project_dir_from_env() -> PathBuf {
-    std::env::var("CLAUDE_PROJECT_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("OBSERVER_PROJECT_DIR").ok().filter(|s| !s.trim().is_empty()))
+    resolve_project_dir_with(None)
+}
+
+/// THE project-dir resolution shared by hooks, trigger, daemon and MCP server:
+/// `CLAUDE_PROJECT_DIR` → `OBSERVER_PROJECT_DIR` → `fallback` (hook-stdin `cwd`, or
+/// the daemon's positional arg) → the process cwd.
+///
+/// The env vars come first on purpose: the hook-stdin `cwd` follows Claude's shell
+/// (`cd sub` in a Bash call), which would otherwise scatter stray
+/// `<sub>/…/knowledge/` stores; `CLAUDE_PROJECT_DIR` is the stable session root.
+pub(crate) fn resolve_project_dir_with(fallback: Option<&str>) -> PathBuf {
+    pick_project_dir(
+        std::env::var("CLAUDE_PROJECT_DIR").ok().as_deref(),
+        std::env::var("OBSERVER_PROJECT_DIR").ok().as_deref(),
+        fallback,
+        std::env::current_dir().ok(),
+    )
+}
+
+/// Pure priority pick behind [`resolve_project_dir_with`] (blank values are skipped).
+fn pick_project_dir(
+    claude: Option<&str>,
+    observer: Option<&str>,
+    fallback: Option<&str>,
+    cwd: Option<PathBuf>,
+) -> PathBuf {
+    [claude, observer, fallback]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.trim().is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
+        .or(cwd)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -390,6 +409,20 @@ mod tests {
     use super::*;
     use crate::store::observer_hint;
     use serde_json::Value;
+
+    #[test]
+    fn project_dir_priority_env_before_stdin_cwd() {
+        let cwd = || Some(PathBuf::from("C:/cwd"));
+        let p = |c, o, f| pick_project_dir(c, o, f, cwd());
+        // CLAUDE_PROJECT_DIR wins over everything, incl. the (cd-following) stdin cwd.
+        assert_eq!(p(Some("C:/claude"), Some("C:/obs"), Some("C:/claude/sub")), PathBuf::from("C:/claude"));
+        assert_eq!(p(None, Some("C:/obs"), Some("C:/sub")), PathBuf::from("C:/obs"));
+        assert_eq!(p(None, None, Some("C:/stdin")), PathBuf::from("C:/stdin"));
+        // Blank values are skipped.
+        assert_eq!(p(Some(" "), Some(""), Some("C:/stdin")), PathBuf::from("C:/stdin"));
+        assert_eq!(p(None, None, Some("  ")), PathBuf::from("C:/cwd"));
+        assert_eq!(pick_project_dir(None, None, None, None), PathBuf::from("."));
+    }
 
     fn fresh_kdir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
