@@ -1150,12 +1150,42 @@ fn spawn_detached_daemon(project_dir: &Path) -> Option<()> {
 }
 
 /// Windows: no console window for the detached daemon (`CREATE_NO_WINDOW`).
+///
+/// `std` spawns with handle inheritance on, so the daemon would also inherit every
+/// inheritable handle of ours — notably our own stdout/stderr pipes. A host reading our
+/// output to EOF (e.g. `observer curate` piped from Enclade) then waited for the long-lived
+/// daemon to exit. Our std handles are made non-inheritable first; `Stdio::inherit` for
+/// later children still works, since `std` duplicates them as inheritable.
 #[cfg(target_os = "windows")]
 fn detach(cmd: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    stop_std_handle_inheritance();
+}
+
+#[cfg(target_os = "windows")]
+fn stop_std_handle_inheritance() {
+    type Handle = *mut std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(n_std_handle: u32) -> Handle;
+        fn SetHandleInformation(h_object: Handle, dw_mask: u32, dw_flags: u32) -> i32;
+    }
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const HANDLE_FLAG_INHERIT: u32 = 0x1;
+    for n in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: plain Win32 calls; a null/invalid handle just makes SetHandleInformation fail.
+        unsafe {
+            let h = GetStdHandle(n);
+            if !h.is_null() && h as isize != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 /// Unix: start a new session so the daemon survives the spawner's exit.
