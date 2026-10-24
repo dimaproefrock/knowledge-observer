@@ -1,3 +1,9 @@
+> **Moved / archived (2026-10):** The Knowledge Observer is now part of
+> [Enclade](https://github.com/dimaproefrock/Enclade) (`crates/observer`) and is
+> developed and shipped there. This repository is archived; the last standalone
+> release is v0.1.20. The branch `dev/curate-ipc` holds the final state that was
+> imported into Enclade.
+
 # Knowledge Observer — a Claude Code plugin
 
 A transparent **knowledge observer** for Claude Code. It watches your work in the
